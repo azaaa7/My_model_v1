@@ -1,0 +1,10 @@
+base: "../b23_ccm_fgm_lite_lora32.yml"
+tfcu:
+  fgm:
+    prompt:
+      enabled: true
+      type: "feature_shift"
+      channels: 32
+train:
+  save_dir: "runs/b23_ccm_fgm_feature_prompt_lora32"
+

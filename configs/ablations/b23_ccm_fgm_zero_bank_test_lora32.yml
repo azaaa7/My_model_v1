@@ -1,0 +1,6 @@
+base: "../b23_ccm_fgm_lite_lora32.yml"
+test_ablation:
+  zero_bank: true
+train:
+  save_dir: "runs/b23_ccm_fgm_zero_bank_test_lora32"
+

@@ -1,0 +1,4 @@
+base: "../b23_ccm_lite_lora32.yml"
+train:
+  save_dir: "runs/b23_ccm_only_lora32"
+

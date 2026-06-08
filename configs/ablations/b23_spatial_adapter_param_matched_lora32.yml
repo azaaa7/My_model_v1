@@ -1,0 +1,17 @@
+base: "../b23_ccm_fgm_lite_lora32.yml"
+tfcu:
+  version: "spatial_adapter_param_matched"
+  ccm:
+    enabled: false
+    aux_head: false
+  fgm:
+    enabled: false
+    propagation: {enabled: false}
+    prompt: {enabled: false}
+    aux_head: false
+aux_loss:
+  ccm_mask32: {enabled: false, weight: 0.0}
+  fgm_mask32: {enabled: false, weight: 0.0}
+train:
+  save_dir: "runs/b23_spatial_adapter_param_matched_lora32"
+

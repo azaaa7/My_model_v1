@@ -1,0 +1,4 @@
+# model=B23TFCUCCMFGMLiteModel tfcu=ccm_fgm_lite lora_rank=32 input_size=512 num_clips=4 num_frames=4
+# loss=1*dice + 0.5*bce + 0.2*tversky + 0.15*boundary aux=0.05*ccm_mask32 + 0.1*fgm_mask32 + 0.2*mask128 + 0.1*boundary128
+# train_samples=DAVIS-VI_tra_DVI_30.npy;DAVIS-VI_tra_CPNET_30.npy val_samples=DAVIS-VI_val_DVI_20.npy;DAVIS-VI_val_CPNET_20.npy
+# batch_size=1 lr=0.0001 params_total=318244502 params_trainable=14939030

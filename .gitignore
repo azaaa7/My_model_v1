@@ -1,0 +1,43 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local temporary/cache files
+cache/
+tmp/
+*.tmp
+*.swp
+*.swo
+
+# IDE/local environment
+.vscode/
+.idea/
+.env
+.venv/
+venv/
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+dinov3/dinov3_weight/
+
+# Training runtime artifacts that should not be versioned
+runs/**/torchrun_logs/
+runs/**/events.out.tfevents*
+runs/**/*.png
+runs/**/*.jpg
+runs/**/*.jpeg
+runs/**/*.npy
+
+# Keep lightweight run metadata/logs if explicitly added.
+!runs/**/log.txt
+!runs/**/log.csv
+!runs/**/config.resolved.json

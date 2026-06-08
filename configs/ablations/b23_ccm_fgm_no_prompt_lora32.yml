@@ -1,0 +1,9 @@
+base: "../b23_ccm_fgm_lite_lora32.yml"
+tfcu:
+  fgm:
+    prompt:
+      enabled: false
+      type: "none"
+train:
+  save_dir: "runs/b23_ccm_fgm_no_prompt_lora32"
+

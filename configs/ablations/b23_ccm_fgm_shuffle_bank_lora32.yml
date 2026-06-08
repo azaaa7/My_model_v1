@@ -1,0 +1,6 @@
+base: "../b23_ccm_fgm_lite_lora32.yml"
+test_ablation:
+  shuffle_bank: true
+train:
+  save_dir: "runs/b23_ccm_fgm_shuffle_bank_lora32"
+
