@@ -1,0 +1,197 @@
+meta:
+  id: "SUMI_LOSSES_CCM_ONLY_V1"
+  name: "b23_sumi_losses_lora32"
+  description: "Conservative CCM-only model with SUMI-style sufficiency/minimality losses. No FGM memory."
+
+runtime:
+  type: train
+  seed: 666666
+
+  input_size: 512
+  batch_size: 1
+  num_clips: 2
+  num_frames: 4
+  clip_stride: 1
+  encoder_chunk: 2
+  gt_ratio: 1
+
+  fgm_bank:
+    train_full_video_windows: false
+    stateful_train: false
+    stateful_eval: false
+    reset_on_new_video: true
+    detach_cross_window: true
+    store_raw_cue: false
+  val_full_video: false
+  test_full_video: true
+  test_max_clips: 2
+  val_num_clips: 1
+  val_test_max_clips: 1
+  val_num_workers: 2
+
+  train_samples:
+    - "./flist/DAVIS-VI_tra_DVI_30.npy"
+    - "./flist/DAVIS-VI_tra_CPNET_30.npy"
+  val_samples:
+    - "./flist/DAVIS-VI_val_DVI_20.npy"
+    - "./flist/DAVIS-VI_val_CPNET_20.npy"
+  test_samples:
+    - "./flist/DAVIS-VI_val_DVI_20.npy"
+    - "./flist/DAVIS-VI_val_CPNET_20.npy"
+    - "./flist/DAVIS-VI_val_OPN_20.npy"
+
+  augment_prob: 0.75
+  spatial_augment_prob: 0.75
+  appearance_augment_prob: 0.5
+  temporal_augment:
+    frame_swap: {enabled: true, prob: 0.15, max_swaps: 1, local_radius: 2}
+    frame_drop: {enabled: true, prob: 0.15, max_drops: 1}
+
+  amp: true
+  use_activation_checkpoint: true
+  grad_accum_steps: 2
+  num_workers: 4
+  log_interval: 20
+
+  dinov3:
+    repo: "./dinov3"
+    weights: "./dinov3/dinov3_weight/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    model_name: "dinov3_vitl16"
+    input_size: 512
+    patch_size: 16
+    output_block: 23
+    output_resolution: 32
+    feature_dim: 1024
+    freeze_backbone: true
+    allow_hub_download: false
+
+  lora:
+    enabled: true
+    rank: 32
+    alpha: 64
+    dropout: 0.1
+    layers: "all"
+    targets: "attn.qkv,attn.proj"
+    lr: 1.0e-5
+
+  model:
+    name: "B23TFCUCCMFGMLiteModel"
+    use_dpt_fpn: false
+    use_detail_stem: false
+    use_tfcu_adapter: true
+    temporal_source: "B23"
+
+  forensic_branch: {enabled: false}
+  forensic_adapter: {enabled: false}
+  reliability_gate: {enabled: false}
+  prototype_memory: {enabled: false}
+  task_forensics_adapter: {enabled: false}
+  temporal_cue_unraveling: {enabled: false}
+
+  tfcu:
+    version: "ccm_sumi_losses"
+    ccm:
+      enabled: true
+      dim: 128
+      heads: 4
+      layers: 1
+      q_resolution: 32
+      kv_resolution: 16
+      frame_mask: "lower_triangular"
+      random_mask: {enabled: true, keep_prob: 0.7}
+      fusion: "residual_concat"
+      alpha_init: 0.002
+      alpha_max: 0.050
+      fuse_zero_init: true
+      aux_head: true
+    fgm:
+      enabled: false
+      cue_dim: 64
+      cue_resolution: 16
+      bank_len: 1
+      detach_bank: true
+      propagation: {enabled: false}
+      aggregation: {enabled: false}
+      prompt: {enabled: false}
+      aux_head: false
+    fusion:
+      type: "concat_fuse"
+      static_channels: 128
+      ccm_channels: 64
+      fgm_channels: 64
+      out_channels: 128
+      use_depthwise_refine: true
+
+  decoder:
+    type: "lite_boundary"
+    input_resolution: 32
+    in_channels: 128
+    stages:
+      - {resolution: 64, channels: 96}
+      - {resolution: 128, channels: 48}
+      - {resolution: 256, channels: 16}
+    logit_resolution: 256
+    final_upsample: "bilinear"
+    output_512_multichannel: false
+    boundary_head: {enabled: true, resolution: 128}
+
+  loss:
+    dice: {weight: 0.9}
+    # bce: {weight: 0.9}
+    # tversky: {weight: 0.2, alpha: 0.3, beta: 0.7}
+    boundary: {weight: 0.10}
+    # sumi:
+    #   enabled: false
+    #   sufficiency:
+    #     start_epoch: 5
+    #     ccm_mask32: 0.020
+    #     mask256: 0.010
+    #   minimality:
+    #     start_epoch: 20
+    #     ib_kl_weight: 0.0002
+    #     bottleneck_dim: 64
+    #   background_suppression:
+    #     enabled: true
+    #     weight: 0.005
+    #   source_adversarial:
+    #     enabled: true
+    #     start_epoch: 30
+    #     num_sources: 3
+    #     weight: 0.010
+    #     grl_lambda: 0.05
+
+  # aux_loss:
+  #   ccm_mask32: {enabled: false, weight: 0.05}
+  #   mask128: {enabled: false, weight: 0.20}
+  #   boundary128: {enabled: false, weight: 0.10}
+
+  optimizer:
+    learning_rate: 1.0e-4
+    lr_lora: 1.0e-5
+    lr_ccm: 2.0e-5
+    lr_sumi: 5.0e-5
+    lr_decoder: 1.0e-4
+    weight_decay: 1.0e-4
+
+  scheduler: {type: "cosine", warmup_epochs: 10, min_lr: 1.0e-6}
+
+  train:
+    n_epochs: 1000
+    save_dir: "runs/b23_sumi_losses_lora32"
+    val_interval: 10
+    save_best_metric: "mean_iou"
+    skip_nonfinite: true
+    max_consecutive_nonfinite: 3
+    max_grad_norm: 1.0
+
+  ddp:
+    auto_torchrun: true
+    cuda_visible_devices: "4,5"
+    nproc_per_node: 2
+    dist_backend: "nccl"
+    find_unused_parameters: false
+    pytorch_cuda_alloc_conf: "expandable_segments:True"
+    torchrun_log_dir: "runs/b23_sumi_losses_lora32/torchrun_logs"
+    torchrun_tee: ""
+
+  debug: {log_shapes: true}

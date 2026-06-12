@@ -128,6 +128,18 @@ runs/b23_ccm_fgm_forensic_gated_lora32
 DINOv3_B23_Forensic_Gated_FGM_Guide.md
 ```
 
+当前四个 `runs/` 实验的结构和训练结果对比见：
+
+```text
+Experiment_Comparison_Current_Runs.md
+```
+
+RGFGM + HP3D/Noise Adapter + Prototype Memory 新版本说明见：
+
+```text
+RGFGM_HP3D_FPM_Implementation_说明.md
+```
+
 如果只想单卡调试，把配置里的：
 
 ```yaml

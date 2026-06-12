@@ -1,0 +1,220 @@
+{
+  "type": "train",
+  "seed": 666666,
+  "input_size": 512,
+  "batch_size": 1,
+  "num_clips": 2,
+  "num_frames": 4,
+  "clip_stride": 1,
+  "encoder_chunk": 2,
+  "gt_ratio": 1,
+  "fgm_bank": {
+    "train_full_video_windows": false,
+    "stateful_train": false,
+    "stateful_eval": false,
+    "reset_on_new_video": true,
+    "detach_cross_window": true,
+    "store_raw_cue": false
+  },
+  "val_full_video": false,
+  "test_full_video": true,
+  "test_max_clips": 2,
+  "val_num_clips": 1,
+  "val_test_max_clips": 1,
+  "val_num_workers": 2,
+  "train_samples": [
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_tra_DVI_30.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_tra_CPNET_30.npy"
+  ],
+  "val_samples": [
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_DVI_20.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_CPNET_20.npy"
+  ],
+  "test_samples": [
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_DVI_20.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_CPNET_20.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_OPN_20.npy"
+  ],
+  "augment_prob": 0.75,
+  "spatial_augment_prob": 0.75,
+  "appearance_augment_prob": 0.5,
+  "temporal_augment": {
+    "frame_swap": {
+      "enabled": true,
+      "prob": 0.15,
+      "max_swaps": 1,
+      "local_radius": 2
+    },
+    "frame_drop": {
+      "enabled": true,
+      "prob": 0.15,
+      "max_drops": 1
+    }
+  },
+  "amp": true,
+  "use_activation_checkpoint": true,
+  "grad_accum_steps": 2,
+  "num_workers": 4,
+  "log_interval": 20,
+  "dinov3": {
+    "repo": "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/dinov3",
+    "weights": "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/dinov3/dinov3_weight/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
+    "model_name": "dinov3_vitl16",
+    "input_size": 512,
+    "patch_size": 16,
+    "output_block": 23,
+    "output_resolution": 32,
+    "feature_dim": 1024,
+    "freeze_backbone": true,
+    "allow_hub_download": false
+  },
+  "lora": {
+    "enabled": true,
+    "rank": 32,
+    "alpha": 64,
+    "dropout": 0.1,
+    "layers": "all",
+    "targets": "attn.qkv,attn.proj",
+    "lr": 1e-05
+  },
+  "model": {
+    "name": "B23TFCUCCMFGMLiteModel",
+    "use_dpt_fpn": false,
+    "use_detail_stem": false,
+    "use_tfcu_adapter": true,
+    "temporal_source": "B23"
+  },
+  "forensic_branch": {
+    "enabled": false
+  },
+  "forensic_adapter": {
+    "enabled": false
+  },
+  "reliability_gate": {
+    "enabled": false
+  },
+  "prototype_memory": {
+    "enabled": false
+  },
+  "task_forensics_adapter": {
+    "enabled": false
+  },
+  "temporal_cue_unraveling": {
+    "enabled": false
+  },
+  "tfcu": {
+    "version": "ccm_sumi_losses",
+    "ccm": {
+      "enabled": true,
+      "dim": 128,
+      "heads": 4,
+      "layers": 1,
+      "q_resolution": 32,
+      "kv_resolution": 16,
+      "frame_mask": "lower_triangular",
+      "random_mask": {
+        "enabled": true,
+        "keep_prob": 0.7
+      },
+      "fusion": "residual_concat",
+      "alpha_init": 0.002,
+      "alpha_max": 0.05,
+      "fuse_zero_init": true,
+      "aux_head": true
+    },
+    "fgm": {
+      "enabled": false,
+      "cue_dim": 64,
+      "cue_resolution": 16,
+      "bank_len": 1,
+      "detach_bank": true,
+      "propagation": {
+        "enabled": false
+      },
+      "aggregation": {
+        "enabled": false
+      },
+      "prompt": {
+        "enabled": false
+      },
+      "aux_head": false
+    },
+    "fusion": {
+      "type": "concat_fuse",
+      "static_channels": 128,
+      "ccm_channels": 64,
+      "fgm_channels": 64,
+      "out_channels": 128,
+      "use_depthwise_refine": true
+    }
+  },
+  "decoder": {
+    "type": "lite_boundary",
+    "input_resolution": 32,
+    "in_channels": 128,
+    "stages": [
+      {
+        "resolution": 64,
+        "channels": 96
+      },
+      {
+        "resolution": 128,
+        "channels": 48
+      },
+      {
+        "resolution": 256,
+        "channels": 16
+      }
+    ],
+    "logit_resolution": 256,
+    "final_upsample": "bilinear",
+    "output_512_multichannel": false,
+    "boundary_head": {
+      "enabled": true,
+      "resolution": 128
+    }
+  },
+  "loss": {
+    "dice": {
+      "weight": 0.9
+    },
+    "boundary": {
+      "weight": 0.1
+    }
+  },
+  "optimizer": {
+    "learning_rate": 0.0001,
+    "lr_lora": 1e-05,
+    "lr_ccm": 2e-05,
+    "lr_sumi": 5e-05,
+    "lr_decoder": 0.0001,
+    "weight_decay": 0.0001
+  },
+  "scheduler": {
+    "type": "cosine",
+    "warmup_epochs": 10,
+    "min_lr": 1e-06
+  },
+  "train": {
+    "n_epochs": 1000,
+    "save_dir": "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/runs/b23_sumi_losses_lora32",
+    "val_interval": 10,
+    "save_best_metric": "mean_iou",
+    "skip_nonfinite": true,
+    "max_consecutive_nonfinite": 3,
+    "max_grad_norm": 1.0
+  },
+  "ddp": {
+    "auto_torchrun": true,
+    "cuda_visible_devices": "4,5",
+    "nproc_per_node": 2,
+    "dist_backend": "nccl",
+    "find_unused_parameters": false,
+    "pytorch_cuda_alloc_conf": "expandable_segments:True",
+    "torchrun_log_dir": "runs/b23_sumi_losses_lora32/torchrun_logs",
+    "torchrun_tee": ""
+  },
+  "debug": {
+    "log_shapes": true
+  }
+}

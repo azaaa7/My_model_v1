@@ -1,0 +1,219 @@
+type: train
+seed: 666666
+
+input_size: 512
+batch_size: 1
+num_clips: 4
+num_frames: 4
+clip_stride: 1
+encoder_chunk: 0
+gt_ratio: 1
+
+train_samples:
+  - "./flist/DAVIS-VI_tra_DVI_30.npy"
+  - "./flist/DAVIS-VI_tra_CPNET_30.npy"
+
+val_samples:
+  - "./flist/DAVIS-VI_val_DVI_20.npy"
+  - "./flist/DAVIS-VI_val_CPNET_20.npy"
+
+test_samples:
+  - "./flist/DAVIS-VI_val_DVI_20.npy"
+  - "./flist/DAVIS-VI_val_CPNET_20.npy"
+  - "./flist/DAVIS-VI_val_OPN_20.npy"
+
+augment_prob: 0.75
+spatial_augment_prob: 0.75
+appearance_augment_prob: 0.75
+
+temporal_augment:
+  frame_swap:
+    enabled: true
+    prob: 0.10
+    max_swaps: 1
+    local_radius: 2
+  frame_drop:
+    enabled: true
+    prob: 0.10
+    max_drops: 1
+
+amp: true
+use_activation_checkpoint: true
+grad_accum_steps: 2
+num_workers: 4
+log_interval: 20
+
+dinov3:
+  repo: "./dinov3"
+  weights: "./dinov3/dinov3_weight/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+  model_name: "dinov3_vitl16"
+  input_size: 512
+  patch_size: 16
+  output_block: 23
+  output_resolution: 32
+  feature_dim: 1024
+  freeze_backbone: true
+  allow_hub_download: false
+
+temporal_encoder:
+  enabled: true
+  type: "patch_token_fusion"
+  insert_position: "after_patch_embed_before_blocks"
+  token_fusion:
+    enabled: true
+    mode: "same_patch_temporal_attention"
+    dim: 1024
+    bottleneck_dim: 128
+    heads: 4
+    dropout: 0.05
+    frame_mask: "bidirectional"
+    alpha_init: 0.01
+    proj_zero_init: true
+    return_residual_energy: true
+
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.1
+  layers: "all"
+  targets: "attn.qkv,attn.proj,mlp.fc1,mlp.fc2"
+
+tfcu:
+  version: "ttf_ccm_lite"
+  ccm:
+    enabled: true
+    dim: 128
+    heads: 4
+    q_resolution: 32
+    kv_resolution: 16
+    frame_mask: "lower_triangular"
+    random_mask: {enabled: true, keep_prob: 0.7}
+    fusion: "residual_concat"
+    alpha_init: 0.01
+    fuse_zero_init: true
+    aux_head: true
+  fgm:
+    enabled: false
+    cue_dim: 64
+    cue_resolution: 16
+    bank_len: 0
+    detach_bank: true
+    propagation: {enabled: false}
+    aggregation: {enabled: false}
+    prompt: {enabled: false}
+    aux_head: false
+
+fusion:
+  type: "concat_fuse"
+  static_channels: 128
+  ccm_channels: 64
+  fgm_channels: 64
+  out_channels: 128
+  use_depthwise_refine: true
+
+decoder:
+  type: "lite_boundary"
+  input_resolution: 32
+  in_channels: 128
+  stages:
+    - {resolution: 64, channels: 96}
+    - {resolution: 128, channels: 48}
+    - {resolution: 256, channels: 16}
+  final_upsample: "bilinear"
+  output_512_multichannel: false
+  boundary_head: {enabled: true, resolution: 128}
+
+fgm_bank:
+  train_full_video_windows: false
+  stateful_train: false
+  stateful_eval: false
+  reset_on_new_video: false
+  detach_cross_window: true
+
+val_full_video: true
+test_full_video: true
+test_max_clips: 4
+
+loss:
+  type: "ttf_minimal"
+
+  seg:
+    weight: 1.0
+
+    focal_bce:
+      enabled: true
+      weight: 0.5
+      gamma: 2.0
+      alpha: 0.75
+
+    dice:
+      enabled: true
+      weight: 0.5
+      smooth: 1.0e-6
+
+  temporal_difference_alignment:
+    enabled: true
+    weight: 0.05
+    warmup_epochs: 10
+    max_pairs: 16
+    downsample: 128
+    loss_type: "charbonnier"
+    eps: 1.0e-3
+
+  boundary:
+    enabled: false
+
+  deep_supervision:
+    enabled: false
+
+  tversky:
+    enabled: false
+
+  token_separation:
+    enabled: false
+
+  ttf_regularization:
+    enabled: false
+
+optimizer:
+  learning_rate: 1.0e-4
+  lr_lora: 1.0e-5
+  lr_temporal_encoder: 5.0e-5
+  lr_ccm: 1.0e-4
+  lr_fgm: 0.0
+  lr_decoder: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  type: "cosine"
+  warmup_epochs: 10
+  min_lr: 1.0e-6
+
+train:
+  n_epochs: 1000
+  save_dir: "runs/b23_ttf_ccm_structloss_lora32"
+  val_interval: 10
+  max_grad_norm: 1.0
+  skip_nonfinite: true
+
+ddp:
+  auto_torchrun: true
+  cuda_visible_devices: "6,7"
+  nproc_per_node: 2
+  dist_backend: "nccl"
+  find_unused_parameters: false
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
+  torchrun_log_dir: "runs/b23_ttf_ccm_structloss_lora32/torchrun_logs"
+  torchrun_tee: ""
+
+relay_units:
+  enabled: false
+  unit_size: 512
+  stride: 384
+  overlap_weight: "hann"
+  relay_tokens: 4
+  relay_layers: [5, 11, 17, 23]
+  relay_alpha_init: 0.0
+
+debug: {log_shapes: true}

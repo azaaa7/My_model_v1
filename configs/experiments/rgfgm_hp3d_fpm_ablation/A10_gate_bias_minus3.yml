@@ -1,0 +1,265 @@
+type: train
+seed: 666666
+input_size: 512
+batch_size: 1
+num_clips: 2
+num_frames: 4
+clip_stride: 1
+encoder_chunk: 2
+gt_ratio: 1
+fgm_bank:
+  train_full_video_windows: true
+  stateful_train: true
+  stateful_eval: true
+  reset_on_new_video: true
+  detach_cross_window: true
+  quality_gate:
+    enabled: true
+    warmup_items: 1
+    keep_threshold: 0.2
+    scale_min: 0.25
+    area_min: 0.001
+    area_max: 0.7
+    min_similarity: 0.05
+    confidence_weight: 0.45
+    area_weight: 0.25
+    consistency_weight: 0.3
+val_full_video: true
+test_full_video: true
+test_max_clips: 2
+train_samples:
+- ./flist/DAVIS-VI_tra_DVI_30.npy
+- ./flist/DAVIS-VI_tra_CPNET_30.npy
+val_samples:
+- ./flist/DAVIS-VI_val_DVI_20.npy
+- ./flist/DAVIS-VI_val_CPNET_20.npy
+test_samples:
+- ./flist/DAVIS-VI_val_DVI_20.npy
+- ./flist/DAVIS-VI_val_CPNET_20.npy
+- ./flist/DAVIS-VI_val_OPN_20.npy
+augment_prob: 0.75
+spatial_augment_prob: 0.75
+appearance_augment_prob: 0.5
+temporal_augment:
+  frame_swap:
+    enabled: true
+    prob: 0.15
+    max_swaps: 1
+    local_radius: 2
+  frame_drop:
+    enabled: true
+    prob: 0.15
+    max_drops: 1
+amp: true
+use_activation_checkpoint: true
+grad_accum_steps: 2
+num_workers: 4
+log_interval: 20
+dinov3:
+  repo: ./dinov3
+  weights: ./dinov3/dinov3_weight/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
+  model_name: dinov3_vitl16
+  input_size: 512
+  patch_size: 16
+  output_block: 23
+  output_resolution: 32
+  feature_dim: 1024
+  freeze_backbone: true
+  allow_hub_download: false
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.1
+  layers: all
+  targets: attn.qkv,attn.proj,mlp.fc1,mlp.fc2
+  lr: 1.0e-05
+model:
+  name: B23TFCUCCMFGMLiteModel
+  use_dpt_fpn: false
+  use_detail_stem: false
+  use_tfcu_adapter: true
+  temporal_source: B23
+forensic_branch:
+  enabled: false
+reliability_gate:
+  enabled: true
+  hidden_dim: 32
+  gate_bias_init: -3.0
+  gate_max: 0.7
+  detach_inputs: true
+forensic_adapter:
+  enabled: true
+  type: hp3d_noise_lite
+  fusion: gated_cross_attention_lite
+  hidden_channels: 32
+  target_resolution: 32
+  alpha_init: 0.001
+  alpha_max: 0.02
+  detach_input: true
+  drop_path: 0.2
+prototype_memory:
+  enabled: true
+  replace_raw_bank: true
+  num_fg_proto: 4
+  num_bg_proto: 4
+  momentum: 0.9
+  temperature: 0.07
+  read_gate_bias_init: -1.5
+  read_gate_max: 0.6
+  write_confidence_min: 0.75
+  write_entropy_max: 0.35
+  write_area_min: 0.002
+  write_area_max: 0.6
+  write_gate_min: 0.15
+  write_warmup_epochs: 10
+tfcu:
+  version: ccm_rgfgm_hp3d_fpm_lite
+  ccm:
+    enabled: true
+    dim: 128
+    heads: 4
+    layers: 1
+    q_resolution: 32
+    kv_resolution: 16
+    frame_mask: lower_triangular
+    random_mask:
+      enabled: true
+      keep_prob: 0.7
+    fusion: residual_concat
+    alpha_init: 0.01
+    fuse_zero_init: true
+    aux_head: true
+  fgm:
+    enabled: true
+    cue_dim: 64
+    cue_resolution: 16
+    bank_len: 5
+    detach_bank: true
+    aggregation:
+      enabled: true
+      use_center_frame: true
+      use_first_last_diff: true
+      diff_scale: 1.0
+      feedback_init: 0.005
+      type: cross_attention
+      dim: 64
+      heads: 4
+    propagation:
+      enabled: true
+      hist_len: 2
+      q_resolution: 32
+      kv_resolution: 16
+      dim: 128
+      heads: 4
+      use_topk: true
+      topk: 128
+    prompt:
+      enabled: true
+      type: feature_shift
+      channels: 32
+    aux_head: true
+  fusion:
+    type: concat_fuse
+    use_sigmoid_gate: false
+    static_channels: 128
+    ccm_channels: 64
+    fgm_channels: 64
+    out_channels: 128
+    use_depthwise_refine: true
+decoder:
+  type: lite_boundary
+  input_resolution: 32
+  in_channels: 128
+  stages:
+  - resolution: 64
+    channels: 96
+  - resolution: 128
+    channels: 48
+  - resolution: 256
+    channels: 16
+  logit_resolution: 256
+  final_upsample: bilinear
+  output_512_multichannel: false
+  boundary_head:
+    enabled: true
+    resolution: 128
+loss:
+  dice:
+    weight: 1.0
+  bce:
+    weight: 0.5
+  tversky:
+    weight: 0.2
+    alpha: 0.3
+    beta: 0.7
+  boundary:
+    weight: 0.2
+  boundary_focal:
+    weight: 0.05
+  temporal_consistency:
+    weight: 0.03
+aux_loss:
+  ccm_mask32:
+    enabled: true
+    weight: 0.05
+  fgm_mask32:
+    enabled: true
+    weight: 0.015
+  noise_mask32:
+    enabled: true
+    weight: 0.015
+  noise_boundary:
+    enabled: true
+    weight: 0.02
+  mask128:
+    enabled: true
+    weight: 0.2
+  boundary128:
+    enabled: true
+    weight: 0.1
+  gate_regularization:
+    enabled: true
+    weight: 0.002
+    target: 0.0
+optimizer:
+  learning_rate: 0.0001
+  lr_lora: 1.0e-05
+  lr_ccm: 2.0e-05
+  lr_fgm: 5.0e-05
+  lr_reliability_gate: 2.0e-05
+  lr_prototype_memory: 1.0e-05
+  lr_forensic_adapter: 1.0e-05
+  lr_decoder: 0.0001
+  weight_decay: 0.0001
+scheduler:
+  type: cosine
+  warmup_epochs: 10
+  min_lr: 1.0e-06
+stability:
+  fgm_feedback_max: 0.05
+  logit_clamp: 30.0
+train:
+  n_epochs: 1000
+  save_dir: runs/A10_gate_bias_minus3_lora32
+  val_interval: 10
+  save_best_metric: mean_iou
+  skip_nonfinite: true
+  max_consecutive_nonfinite: 3
+  max_grad_norm: 1.0
+ddp:
+  auto_torchrun: true
+  cuda_visible_devices: 4,5
+  nproc_per_node: 2
+  dist_backend: nccl
+  find_unused_parameters: false
+  pytorch_cuda_alloc_conf: expandable_segments:True
+  torchrun_log_dir: runs/A10_gate_bias_minus3_lora32/torchrun_logs
+  torchrun_tee: ''
+debug:
+  log_shapes: true
+  log_ccm_attn_stats: true
+  log_fgm_bank_stats: true
+  log_fusion_norms: true
+  log_decoder_shapes: true
+  save_visualization: false

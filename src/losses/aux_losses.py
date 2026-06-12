@@ -54,7 +54,16 @@ class AuxiliaryLoss(nn.Module):
         total = target.sum() * 0.0
         items: dict[str, float] = {}
 
-        for key in ("ccm_mask32", "fgm_mask32", "mask128"):
+        for key in (
+            "ccm_mask32",
+            "fgm_mask32",
+            "noise_mask32",
+            "adapter_mask32",
+            "tcu_momentary_mask32",
+            "tcu_gradual_mask32",
+            "tcu_cumulative_mask32",
+            "mask128",
+        ):
             cfg = self.cfg.get(key, {}) or {}
             pred = aux.get(key)
             if not bool(cfg.get("enabled", False)) or pred is None:
@@ -62,13 +71,56 @@ class AuxiliaryLoss(nn.Module):
             value = self._mask_loss(pred, target)
             total = total + float(cfg.get("weight", 1.0)) * value
             items[f"aux_{key}_loss"] = float(value.detach().cpu())
+            alias = {
+                "adapter_mask32": "adapter_mask32_loss",
+                "tcu_momentary_mask32": "tcu_momentary_loss",
+                "tcu_gradual_mask32": "tcu_gradual_loss",
+                "tcu_cumulative_mask32": "tcu_cumulative_loss",
+            }.get(key)
+            if alias:
+                items[alias] = float(value.detach().cpu())
 
-        cfg = self.cfg.get("boundary128", {}) or {}
-        pred = aux.get("boundary128")
-        if bool(cfg.get("enabled", False)) and pred is not None:
-            value = self._boundary_loss(pred, target)
+        for key in ("boundary128", "noise_boundary", "adapter_boundary32"):
+            cfg = self.cfg.get(key, {}) or {}
+            pred = aux.get(key)
+            if bool(cfg.get("enabled", False)) and pred is not None:
+                value = self._boundary_loss(pred, target)
+                total = total + float(cfg.get("weight", 1.0)) * value
+                items[f"aux_{key}_loss"] = float(value.detach().cpu())
+                if key == "adapter_boundary32":
+                    items["adapter_boundary32_loss"] = float(value.detach().cpu())
+
+        cfg = self.cfg.get("adapter_gate_l1", {}) or {}
+        pred = aux.get("adapter_gate")
+        if bool(cfg.get("enabled", False)) and pred is not None and torch.is_tensor(pred):
+            value = pred.float().abs().mean()
             total = total + float(cfg.get("weight", 1.0)) * value
-            items["aux_boundary128_loss"] = float(value.detach().cpu())
+            items["aux_adapter_gate_l1_loss"] = float(value.detach().cpu())
+
+        cfg = self.cfg.get("tcu_branch_diversity", {}) or {}
+        maps = [aux.get(key) for key in ("tcu_momentary_mask32", "tcu_gradual_mask32", "tcu_cumulative_mask32")]
+        if bool(cfg.get("enabled", False)) and all(torch.is_tensor(x) for x in maps):
+            flats = [torch.sigmoid(x.float()).reshape(-1, x.shape[-3] * x.shape[-2] * x.shape[-1]) for x in maps]
+            value = target.sum() * 0.0
+            count = 0
+            for i in range(len(flats)):
+                for j in range(i + 1, len(flats)):
+                    a = flats[i] - flats[i].mean(dim=1, keepdim=True)
+                    b = flats[j] - flats[j].mean(dim=1, keepdim=True)
+                    corr = (a * b).mean(dim=1) / (a.std(dim=1).clamp_min(1.0e-6) * b.std(dim=1).clamp_min(1.0e-6))
+                    value = value + corr.abs().mean()
+                    count += 1
+            value = value / max(count, 1)
+            total = total + float(cfg.get("weight", 1.0)) * value
+            items["aux_tcu_branch_diversity_loss"] = float(value.detach().cpu())
+
+        cfg = self.cfg.get("gate_regularization", {}) or {}
+        pred = aux.get("gate_regularization")
+        if bool(cfg.get("enabled", False)) and pred is not None and torch.is_tensor(pred):
+            target_value = float(cfg.get("target", 0.0))
+            value = (pred.float() - target_value).pow(2).mean()
+            total = total + float(cfg.get("weight", 1.0)) * value
+            items["aux_gate_regularization_loss"] = float(value.detach().cpu())
 
         items["aux_loss"] = float(total.detach().cpu())
         return total, items

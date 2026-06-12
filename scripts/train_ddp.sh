@@ -6,4 +6,5 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 cd "$(dirname "$0")/.."
+source scripts/_runtime_env.sh
 python train.py --config "$CONFIG" "$@"

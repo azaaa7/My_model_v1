@@ -21,7 +21,14 @@ def load_config(path: str | Path) -> dict[str, Any]:
         if not base_path.is_absolute():
             base_path = path.parent / base_path
         base_cfg = load_config(base_path)
-        return deep_update(base_cfg, cfg)
+        cfg = deep_update(base_cfg, cfg)
+    return runtime_config(cfg)
+
+
+def runtime_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return the runtime section for meta/runtime/ablation YAML files."""
+    if isinstance(cfg, dict) and isinstance(cfg.get("runtime"), dict):
+        return cfg["runtime"]
     return cfg
 
 

@@ -59,7 +59,8 @@ def _split_devices(value: Any) -> list[str]:
         return []
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
-    return [item.strip() for item in str(value).split(",") if item.strip()]
+    normalized = str(value).replace("，", ",")
+    return [item.strip() for item in normalized.split(",") if item.strip()]
 
 
 def maybe_relaunch_with_torchrun(cfg: dict[str, Any], config_path: Path) -> None:

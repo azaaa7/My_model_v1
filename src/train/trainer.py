@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from src.data import build_dataloader
 from src.eval.metrics import AverageMeter, binary_metrics_from_logits
-from src.losses import AuxiliaryLoss, SegmentationLoss
+from src.losses import AuxiliaryLoss, CompositeForensicLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss
 from src.models import B23TFCUCCMFGMLiteModel
 from src.models.b23_tfcu_ccm_fgm_model import count_parameters, count_trainable_by_keyword
 from src.train.checkpoint import load_checkpoint, save_checkpoint
@@ -22,6 +22,44 @@ from src.utils.logger import append_csv, dump_json, ensure_dir, log_debug_dict
 
 
 METRIC_KEYS = ["iou", "f1", "precision", "recall", "accuracy"]
+DEBUG_METRIC_PREFIXES = (
+    "reliability_gate_",
+    "forensic_adapter_",
+    "prototype_memory_",
+    "adapter_",
+    "tcu_",
+    "temporal_encoder_",
+    "ttf_",
+    "sumi_",
+    "background_suppression_",
+)
+ALWAYS_LOG_METRICS = (
+    "adapter_mask32_loss",
+    "adapter_boundary32_loss",
+    "tcu_momentary_loss",
+    "tcu_gradual_loss",
+    "tcu_cumulative_loss",
+    "sumi_sufficiency_loss",
+    "sumi_ib_kl",
+    "sumi_source_adv_loss",
+    "background_suppression_loss",
+    "sumi_loss",
+    "adapter_alpha",
+    "adapter_gate_mean",
+    "tcu_alpha",
+    "tcu_gate_momentary_mean",
+    "tcu_gate_gradual_mean",
+    "tcu_gate_cumulative_mean",
+    "tcu_quality_mean",
+    "ttf_alpha",
+    "ttf_residual_energy",
+    "loss_total",
+    "loss_seg",
+    "loss_focal_bce",
+    "loss_dice",
+    "loss_tda",
+    "tda_weight",
+)
 
 
 def _format_log_value(value: float | int | None) -> str:
@@ -36,6 +74,16 @@ def _current_lr(optimizer) -> float:
     if not optimizer.param_groups:
         return 0.0
     return float(optimizer.param_groups[0].get("lr", 0.0))
+
+
+def build_loss(cfg: dict[str, Any]):
+    loss_cfg = cfg.get("loss", {}) or {}
+    loss_type = str(loss_cfg.get("type", "")).lower()
+    if loss_type == "composite_forensic":
+        return CompositeForensicLoss(loss_cfg), None
+    if loss_type == "ttf_minimal":
+        return TTFMinimalLoss(loss_cfg), None
+    return SegmentationLoss(loss_cfg), AuxiliaryLoss(cfg.get("aux_loss", {}))
 
 
 def _update_meter(meters: dict[str, AverageMeter], key: str, value: float, n: int = 1) -> None:
@@ -58,17 +106,46 @@ def _log_fields(train_metrics: dict[str, float], val_metrics: dict[str, float] |
     fields = ["epoch", "lr"]
     train_keys = ["loss", "main_loss", "aux_loss"]
     train_keys.extend(key for key in sorted(train_metrics) if key.endswith("_loss") and key not in train_keys)
+    train_keys.extend(key for key in ALWAYS_LOG_METRICS if key not in train_keys)
     train_keys.extend(METRIC_KEYS)
+    train_keys.extend(
+        key
+        for key in sorted(train_metrics)
+        if key not in train_keys and key not in METRIC_KEYS and any(key.startswith(prefix) for prefix in DEBUG_METRIC_PREFIXES)
+    )
     fields.extend(f"train_{key}" for key in train_keys)
     fields.append("val_loss")
     fields.extend(f"val_{key}" for key in METRIC_KEYS)
+    fields.extend(f"val_{key}" for key in ALWAYS_LOG_METRICS if f"val_{key}" not in fields)
     if val_metrics:
         fields.extend(
             f"val_{key}"
             for key in sorted(val_metrics)
             if key.endswith("_loss") and key != "loss" and f"val_{key}" not in fields
         )
+        fields.extend(
+            f"val_{key}"
+            for key in sorted(val_metrics)
+            if any(key.startswith(prefix) for prefix in DEBUG_METRIC_PREFIXES) and f"val_{key}" not in fields
+        )
     return fields
+
+
+def _debug_scalar_items(debug: dict[str, Any] | None) -> dict[str, float]:
+    if not isinstance(debug, dict):
+        return {}
+    items: dict[str, float] = {}
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, sub_value in value.items():
+                if isinstance(sub_value, (int, float)) and any(str(key).startswith(prefix) for prefix in DEBUG_METRIC_PREFIXES):
+                    items[str(key)] = float(sub_value)
+                elif isinstance(sub_value, dict):
+                    visit(sub_value)
+
+    visit(debug)
+    return items
 
 
 def _init_log_txt(path: Path, cfg: dict[str, Any], model) -> None:
@@ -88,11 +165,20 @@ def _init_log_txt(path: Path, cfg: dict[str, Any], model) -> None:
     aux_cfg = cfg.get("aux_loss", {}) or {}
     loss_parts = []
     for name, args in loss_cfg.items():
+        if name == "type":
+            loss_parts.append(str(args))
+            continue
+        if not isinstance(args, dict):
+            continue
+        if args.get("enabled") is False:
+            continue
         weight = float((args or {}).get("weight", 1.0))
         if weight > 0:
             loss_parts.append(f"{weight:g}*{name}")
     aux_parts = []
     for name, args in aux_cfg.items():
+        if not isinstance(args, dict):
+            continue
         if bool((args or {}).get("enabled", False)):
             aux_parts.append(f"{float((args or {}).get('weight', 1.0)):g}*{name}")
     lines = [
@@ -129,11 +215,14 @@ def _append_epoch_log(path: Path, epoch: int, lr: float, train_metrics: dict[str
 def make_loader(cfg: dict[str, Any], mode: str, distributed: bool = False, rank: int = 0, world_size: int = 1):
     samples_key = "test_samples" if mode == "test" else "val_samples" if mode == "val" else "train_samples"
     bank_cfg = cfg.get("fgm_bank", {}) or {}
+    num_clips = int(cfg.get(f"{mode}_num_clips", cfg.get("num_clips", 4)))
+    test_max_clips = int(cfg.get(f"{mode}_test_max_clips", cfg.get("test_max_clips", num_clips)))
+    num_workers = int(cfg.get(f"{mode}_num_workers", cfg.get("num_workers", 4)))
     return build_dataloader(
         samples=cfg[samples_key],
         mode=mode,
         batch_size=int(cfg.get("batch_size", 1)) if mode == "train" else 1,
-        num_workers=int(cfg.get("num_workers", 4)),
+        num_workers=num_workers,
         input_size=int(cfg.get("input_size", 512)),
         gt_ratio=int(cfg.get("gt_ratio", 1)),
         num_frames=int(cfg.get("num_frames", 4)),
@@ -141,10 +230,10 @@ def make_loader(cfg: dict[str, Any], mode: str, distributed: bool = False, rank:
         augment_prob=float(cfg.get("augment_prob", 0.75)),
         spatial_augment_prob=cfg.get("spatial_augment_prob", None),
         appearance_augment_prob=cfg.get("appearance_augment_prob", None),
-        num_clips=int(cfg.get("num_clips", 4)),
+        num_clips=num_clips,
         clip_stride=int(cfg.get("clip_stride", 1)),
         use_tfcu_adapter=True,
-        test_max_clips=int(cfg.get("test_max_clips", cfg.get("num_clips", 4))),
+        test_max_clips=test_max_clips,
         train_full_video_windows=bool(bank_cfg.get("train_full_video_windows", cfg.get("train_full_video_windows", False))),
         val_full_video=bool(cfg.get("val_full_video", False)),
         test_full_video=bool(cfg.get("test_full_video", True)),
@@ -289,7 +378,18 @@ def align_logits_masks(logits: torch.Tensor, masks: torch.Tensor):
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, aux_criterion, device, cfg, ablation: dict[str, Any] | None = None):
+def evaluate(
+    model,
+    loader,
+    criterion,
+    aux_criterion,
+    sumi_criterion,
+    device,
+    cfg,
+    ablation: dict[str, Any] | None = None,
+    epoch: int = 10**9,
+    include_aux_losses: bool = True,
+):
     model.eval()
     meters = {key: AverageMeter() for key in ["loss", "iou", "f1", "precision", "recall", "accuracy"]}
     use_stateful_bank = _stateful_bank_enabled(cfg, "eval")
@@ -316,9 +416,26 @@ def evaluate(model, loader, criterion, aux_criterion, device, cfg, ablation: dic
         logits, target = align_logits_masks(out["logits"], masks)
         valid_mask = _valid_mask_from_batch(batch, device)
         logits, target, aux = _filter_by_valid_mask(logits, target, out["aux"], valid_mask)
-        loss, _ = criterion(logits, target)
-        aux_loss, _ = aux_criterion(aux, target)
-        total_loss = loss + aux_loss
+        if aux_criterion is None:
+            total_loss, loss_items = criterion(
+                logits,
+                target,
+                aux=aux,
+                epoch=epoch,
+                include_aux=include_aux_losses,
+            )
+            sumi_items = {}
+        else:
+            loss, _ = criterion(logits, target)
+            if include_aux_losses:
+                aux_loss, _ = aux_criterion(aux, target)
+                sumi_loss, sumi_items = sumi_criterion(aux, target, epoch=epoch, source_names=_name)
+            else:
+                aux_loss = target.sum() * 0.0
+                sumi_loss = target.sum() * 0.0
+                sumi_items = {}
+            total_loss = loss + aux_loss + sumi_loss
+            loss_items = {}
         metrics = binary_metrics_from_logits(
             logits.reshape(-1, 1, logits.shape[-2], logits.shape[-1]),
             target.reshape(-1, 1, target.shape[-2], target.shape[-1]),
@@ -327,6 +444,12 @@ def evaluate(model, loader, criterion, aux_criterion, device, cfg, ablation: dic
         meters["loss"].update(float(total_loss.detach().cpu()), batch_weight)
         for key, value in metrics.items():
             meters[key].update(value, batch_weight)
+        for key, value in _debug_scalar_items(aux.get("debug", {})).items():
+            _update_meter(meters, key, value, batch_weight)
+        for key, value in loss_items.items():
+            _update_meter(meters, key, value, batch_weight)
+        for key, value in sumi_items.items():
+            _update_meter(meters, key, value, batch_weight)
         if reset_on_new_video and use_stateful_bank and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
             fgm_bank = None
             current_video_id = None
@@ -339,6 +462,10 @@ def _print_param_report(model) -> None:
     print(f"trainable params: {trainable}")
     print(f"LoRA trainable params: {count_trainable_by_keyword(model, ('lora_',))}")
     print(f"TFCU trainable params: {count_trainable_by_keyword(model, ('ccm.', 'fgm.', 'fusion.', 'static_adapter.'))}")
+    print(f"Task adapter trainable params: {count_trainable_by_keyword(model, ('task_adapter.',))}")
+    print(f"TCU unravel trainable params: {count_trainable_by_keyword(model, ('tcu.',))}")
+    print(f"TTF temporal encoder trainable params: {count_trainable_by_keyword(model, ('temporal_fusion.', 'ttf'))}")
+    print(f"SUMI heads trainable params: {count_trainable_by_keyword(model, ('sumi_heads.',))}")
     print(f"decoder trainable params: {count_trainable_by_keyword(model, ('decoder.',))}")
 
 
@@ -367,8 +494,13 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
 
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
-    criterion = SegmentationLoss(cfg.get("loss", {})).to(device)
-    aux_criterion = AuxiliaryLoss(cfg.get("aux_loss", {})).to(device)
+    criterion, aux_criterion = build_loss(cfg)
+    criterion = criterion.to(device)
+    if aux_criterion is not None:
+        aux_criterion = aux_criterion.to(device)
+        sumi_criterion = SUMILocalizationLoss((cfg.get("loss", {}) or {}).get("sumi", {})).to(device)
+    else:
+        sumi_criterion = None
     scaler = torch.cuda.amp.GradScaler(enabled=bool(cfg.get("amp", True)) and torch.cuda.is_available())
     start_epoch = 0
     best_iou = -1.0
@@ -384,6 +516,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
     train_cfg = cfg.get("train", {}) or {}
     max_grad_norm = float(train_cfg.get("max_grad_norm", cfg.get("max_grad_norm", 1.0)))
     skip_nonfinite = bool(train_cfg.get("skip_nonfinite", True))
+    max_consecutive_nonfinite = int(train_cfg.get("max_consecutive_nonfinite", 3))
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     debug_once = bool((cfg.get("debug", {}) or {}).get("log_shapes", True))
 
@@ -397,6 +530,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
         fgm_bank = None
         current_video_id = None
         nonfinite_skips = 0
+        consecutive_nonfinite = 0
         optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(train_loader):
             images, masks, _name = unpack_batch(batch)
@@ -413,20 +547,30 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
             else:
                 fgm_bank = None
             with torch.cuda.amp.autocast(enabled=bool(cfg.get("amp", True)) and torch.cuda.is_available()):
-                out = model(images, mode="train", fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank)
+                out = model(images, mode="train", fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank, epoch=epoch)
                 if use_stateful_bank:
                     fgm_bank = out.get("fgm_bank", fgm_bank)
                 logits, target = align_logits_masks(out["logits"], masks)
                 valid_mask = _valid_mask_from_batch(batch, device)
                 logits, target, aux = _filter_by_valid_mask(logits, target, out["aux"], valid_mask)
-                main_loss, main_items = criterion(logits, target)
-                aux_loss, aux_items = aux_criterion(aux, target)
-                total_loss = main_loss + aux_loss
+                if aux_criterion is None:
+                    total_loss, loss_items = criterion(logits, target, aux=aux, epoch=epoch, include_aux=True)
+                    main_loss = total_loss
+                    aux_loss = total_loss * 0.0
+                    main_items = loss_items
+                    aux_items = {}
+                    sumi_items = {}
+                else:
+                    main_loss, main_items = criterion(logits, target)
+                    aux_loss, aux_items = aux_criterion(aux, target)
+                    sumi_loss, sumi_items = sumi_criterion(aux, target, epoch=epoch, source_names=_name)
+                    total_loss = main_loss + aux_loss + sumi_loss
                 loss = total_loss / grad_accum
 
             loss_is_bad = not bool(torch.isfinite(total_loss.detach()).all().item() and torch.isfinite(loss.detach()).all().item())
             if skip_nonfinite and _distributed_any(loss_is_bad, device):
                 nonfinite_skips += 1
+                consecutive_nonfinite += 1
                 optimizer.zero_grad(set_to_none=True)
                 fgm_bank = None
                 current_video_id = None
@@ -436,6 +580,8 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                         f"video={_batch_str(batch, 'video_id', _name) if isinstance(batch, dict) else _name} "
                         f"window={_batch_first(batch.get('window_id'), '') if isinstance(batch, dict) else ''}"
                     )
+                if max_consecutive_nonfinite > 0 and consecutive_nonfinite >= max_consecutive_nonfinite:
+                    raise RuntimeError(f"stopped after {consecutive_nonfinite} consecutive non-finite losses")
                 continue
             scaler.scale(loss).backward()
             if (step + 1) % grad_accum == 0:
@@ -444,6 +590,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                 grad_norm, grad_is_finite = _grad_norm_and_finite(trainable_params, max_grad_norm)
                 if skip_nonfinite and _distributed_any(not grad_is_finite, device):
                     nonfinite_skips += 1
+                    consecutive_nonfinite += 1
                     optimizer.zero_grad(set_to_none=True)
                     fgm_bank = None
                     current_video_id = None
@@ -454,21 +601,26 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                             f"[warn] skipped non-finite grad at epoch {epoch:04d} step {step + 1:04d}; "
                             f"grad_norm={float(grad_norm.detach().cpu())}"
                         )
+                    if max_consecutive_nonfinite > 0 and consecutive_nonfinite >= max_consecutive_nonfinite:
+                        raise RuntimeError(f"stopped after {consecutive_nonfinite} consecutive non-finite gradients")
                     continue
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
+            consecutive_nonfinite = 0
 
             total_loss_value = float(total_loss.detach().cpu())
             batch_weight = _num_target_frames(target)
             _update_meter(train_meters, "loss", total_loss_value, batch_weight)
-            for key, value in {**main_items, **aux_items}.items():
+            for key, value in {**main_items, **aux_items, **sumi_items}.items():
                 _update_meter(train_meters, key, value, batch_weight)
             metric_items = binary_metrics_from_logits(
                 logits.detach().reshape(-1, 1, logits.shape[-2], logits.shape[-1]),
                 target.detach().reshape(-1, 1, target.shape[-2], target.shape[-1]),
             )
             for key, value in metric_items.items():
+                _update_meter(train_meters, key, value, batch_weight)
+            for key, value in _debug_scalar_items(aux.get("debug", {})).items():
                 _update_meter(train_meters, key, value, batch_weight)
 
             if debug_once and is_main_process():
@@ -499,6 +651,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
 
         train_metrics = _meters_to_dict(train_meters)
         metrics = {"epoch": epoch, "train_loss": train_metrics.get("loss", 0.0)}
+        metrics.update({f"train_{k}": v for k, v in train_metrics.items() if k != "loss"})
         if is_main_process():
             print(
                 f"[epoch {epoch}] train loss {train_metrics.get('loss', 0.0):.4f} "
@@ -508,13 +661,13 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
         if (epoch + 1) % val_interval == 0 or epoch == n_epochs - 1:
             if distributed:
                 if is_main_process():
-                    val_metrics = evaluate(_inner_model(model), main_val_loader, criterion, aux_criterion, device, cfg)
+                    val_metrics = evaluate(_inner_model(model), main_val_loader, criterion, aux_criterion, sumi_criterion, device, cfg, epoch=epoch)
                     metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
                 else:
                     val_metrics = None
                 dist.barrier()
             else:
-                val_metrics = evaluate(model, val_loader, criterion, aux_criterion, device, cfg)
+                val_metrics = evaluate(model, val_loader, criterion, aux_criterion, sumi_criterion, device, cfg, epoch=epoch)
                 metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
             if is_main_process() and val_metrics is not None:
                 print(

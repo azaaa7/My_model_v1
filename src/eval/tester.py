@@ -6,10 +6,9 @@ from typing import Any
 import torch
 
 from src.eval.metrics import AverageMeter, binary_metrics_from_logits
-from src.losses import AuxiliaryLoss, SegmentationLoss
 from src.models import B23TFCUCCMFGMLiteModel
 from src.train.checkpoint import load_checkpoint
-from src.train.trainer import evaluate, make_loader
+from src.train.trainer import build_loss, evaluate, make_loader
 from src.utils.config import prepare_config
 
 
@@ -32,11 +31,20 @@ def _sample_names(value) -> list[str]:
 def _loss_summary(cfg: dict[str, Any]) -> str:
     parts = []
     for name, args in (cfg.get("loss", {}) or {}).items():
+        if name == "type":
+            parts.append(str(args))
+            continue
+        if not isinstance(args, dict):
+            continue
+        if args.get("enabled") is False:
+            continue
         weight = float((args or {}).get("weight", 1.0))
         if weight > 0:
             parts.append(f"{weight:g}*{name}")
     aux = []
     for name, args in (cfg.get("aux_loss", {}) or {}).items():
+        if not isinstance(args, dict):
+            continue
         if bool((args or {}).get("enabled", False)):
             aux.append(f"{float((args or {}).get('weight', 1.0)):g}*{name}")
     if aux:
@@ -101,15 +109,35 @@ def print_test_summary(
             f"  {'Average':<14s} {avg['iou']:8.4f} {avg['f1']:8.4f} "
             f"{avg['precision']:10.4f} {avg['recall']:8.4f} {avg['loss']:8.4f}"
         )
+        by_name = {item["subset"]: item["metrics"] for item in results}
+        same_source = [by_name[name]["iou"] for name in ("DVI_20", "CPNET_20") if name in by_name]
+        opn_iou = by_name["OPN_20"]["iou"] if "OPN_20" in by_name else None
+        if same_source:
+            same_source_avg = sum(same_source) / len(same_source)
+            lines.append(f"  same_source_avg IoU : {same_source_avg:.4f}")
+            if opn_iou is not None:
+                pareto_score = same_source_avg + 0.7 * opn_iou
+                lines.append(f"  cross_source_opn IoU: {opn_iou:.4f}")
+                lines.append(f"  pareto_score        : {pareto_score:.4f}")
         lines.append(f"  Best: {best_name}  IoU={best_iou:.4f}")
     lines.append("=" * 72)
     print("\n".join(lines))
 
 
 @torch.no_grad()
-def evaluate_loader(model, loader, criterion, aux_criterion, device, cfg: dict[str, Any], ablation: dict[str, Any] | None = None):
+def evaluate_loader(model, loader, criterion, aux_criterion, sumi_criterion, device, cfg: dict[str, Any], ablation: dict[str, Any] | None = None):
     model.eval()
-    return evaluate(model, loader, criterion, aux_criterion, device, cfg, ablation=ablation)
+    return evaluate(
+        model,
+        loader,
+        criterion,
+        aux_criterion,
+        sumi_criterion,
+        device,
+        cfg,
+        ablation=ablation,
+        include_aux_losses=False,
+    )
 
 
 def run_test(cfg: dict[str, Any], checkpoint: str, ablation: dict[str, Any] | None = None):
@@ -117,8 +145,15 @@ def run_test(cfg: dict[str, Any], checkpoint: str, ablation: dict[str, Any] | No
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = B23TFCUCCMFGMLiteModel(cfg).to(device)
     load_checkpoint(checkpoint, model, strict=False)
-    criterion = SegmentationLoss(cfg.get("loss", {})).to(device)
-    aux_criterion = AuxiliaryLoss(cfg.get("aux_loss", {})).to(device)
+    criterion, aux_criterion = build_loss(cfg)
+    criterion = criterion.to(device)
+    if aux_criterion is not None:
+        aux_criterion = aux_criterion.to(device)
+        from src.losses import SUMILocalizationLoss
+
+        sumi_criterion = SUMILocalizationLoss((cfg.get("loss", {}) or {}).get("sumi", {})).to(device)
+    else:
+        sumi_criterion = None
 
     results: list[dict[str, Any]] = []
     for sample_path in cfg.get("test_samples", []):
@@ -126,7 +161,7 @@ def run_test(cfg: dict[str, Any], checkpoint: str, ablation: dict[str, Any] | No
         run_cfg["test_samples"] = [sample_path]
         loader = make_loader(run_cfg, "test", distributed=False)
         name = _dataset_name(sample_path)
-        metrics = evaluate_loader(model, loader, criterion, aux_criterion, device, run_cfg, ablation=ablation)
+        metrics = evaluate_loader(model, loader, criterion, aux_criterion, sumi_criterion, device, run_cfg, ablation=ablation)
         results.append({"subset": name, "metrics": metrics})
         print(
             f"[test/{name}] loss {metrics['loss']:.4f} "

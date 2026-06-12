@@ -52,7 +52,7 @@ class TemporalDeltaLoss(nn.Module):
 
 
 class SegmentationLoss(nn.Module):
-    SUPPORTED = {"dice", "bce", "tversky", "boundary", "temporal_delta"}
+    SUPPORTED = {"dice", "bce", "tversky", "boundary", "boundary_focal", "temporal_delta", "temporal_consistency"}
 
     def __init__(self, cfg: dict[str, Any] | None = None):
         super().__init__()
@@ -76,9 +76,9 @@ class SegmentationLoss(nn.Module):
                     beta=float(args.get("beta", 0.7)),
                     smooth=float(args.get("smooth", 1e-6)),
                 )
-            elif name == "boundary":
+            elif name in {"boundary", "boundary_focal"}:
                 self.modules_map[name] = BoundaryLoss(kernel_size=int(args.get("kernel_size", 3)))
-            elif name == "temporal_delta":
+            elif name in {"temporal_delta", "temporal_consistency"}:
                 self.modules_map[name] = TemporalDeltaLoss()
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
@@ -96,7 +96,7 @@ class SegmentationLoss(nn.Module):
         for name, weight in self.weights.items():
             if name == "bce":
                 value = F.binary_cross_entropy_with_logits(logits_4d, target_4d)
-            elif name in {"boundary", "temporal_delta"}:
+            elif name in {"boundary", "boundary_focal", "temporal_delta", "temporal_consistency"}:
                 value = self.modules_map[name](logits, target)
             else:
                 value = self.modules_map[name](logits_4d, target_4d)
@@ -105,4 +105,3 @@ class SegmentationLoss(nn.Module):
 
         items["main_loss"] = float(total.detach().cpu())
         return total, items
-
