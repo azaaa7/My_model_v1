@@ -246,5 +246,6 @@
   },
   "debug": {
     "log_shapes": true
-  }
+  },
+  "checkpoint": "runs/b23_ttf_ccm_structloss_lora32/latest.pt"
 }

@@ -6,7 +6,7 @@ from typing import Any
 import torch
 
 from src.eval.metrics import AverageMeter, binary_metrics_from_logits
-from src.models import B23TFCUCCMFGMLiteModel
+from src.models.builder import build_model
 from src.train.checkpoint import load_checkpoint
 from src.train.trainer import build_loss, evaluate, make_loader
 from src.utils.config import prepare_config
@@ -143,7 +143,7 @@ def evaluate_loader(model, loader, criterion, aux_criterion, sumi_criterion, dev
 def run_test(cfg: dict[str, Any], checkpoint: str, ablation: dict[str, Any] | None = None):
     cfg = prepare_config(cfg)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = B23TFCUCCMFGMLiteModel(cfg).to(device)
+    model = build_model(cfg).to(device)
     load_checkpoint(checkpoint, model, strict=False)
     criterion, aux_criterion = build_loss(cfg)
     criterion = criterion.to(device)

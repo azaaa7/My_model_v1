@@ -10,15 +10,15 @@ from torch.nn.parallel import DistributedDataParallel
 
 from src.data import build_dataloader
 from src.eval.metrics import AverageMeter, binary_metrics_from_logits
-from src.losses import AuxiliaryLoss, CompositeForensicLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss
-from src.models import B23TFCUCCMFGMLiteModel
+from src.losses import AuxiliaryLoss, CompositeForensicLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss, VideoMTLoss
+from src.models.builder import build_model
 from src.models.b23_tfcu_ccm_fgm_model import count_parameters, count_trainable_by_keyword
 from src.train.checkpoint import load_checkpoint, save_checkpoint
 from src.train.optimizer import build_optimizer
 from src.train.scheduler import build_scheduler
 from src.utils.config import prepare_config
 from src.utils.distributed import is_main_process
-from src.utils.logger import append_csv, dump_json, ensure_dir, log_debug_dict
+from src.utils.logger import dump_json, ensure_dir, log_debug_dict
 
 
 METRIC_KEYS = ["iou", "f1", "precision", "recall", "accuracy"]
@@ -30,6 +30,7 @@ DEBUG_METRIC_PREFIXES = (
     "tcu_",
     "temporal_encoder_",
     "ttf_",
+    "videomt_",
     "sumi_",
     "background_suppression_",
 )
@@ -55,8 +56,10 @@ ALWAYS_LOG_METRICS = (
     "ttf_residual_energy",
     "loss_total",
     "loss_seg",
+    "loss_bce",
     "loss_focal_bce",
     "loss_dice",
+    "loss_edge",
     "loss_tda",
     "tda_weight",
 )
@@ -79,10 +82,13 @@ def _current_lr(optimizer) -> float:
 def build_loss(cfg: dict[str, Any]):
     loss_cfg = cfg.get("loss", {}) or {}
     loss_type = str(loss_cfg.get("type", "")).lower()
+    loss_name = str(loss_cfg.get("name", "")).lower()
     if loss_type == "composite_forensic":
         return CompositeForensicLoss(loss_cfg), None
     if loss_type == "ttf_minimal":
         return TTFMinimalLoss(loss_cfg), None
+    if loss_type == "videomt" or loss_name == "videomtloss":
+        return VideoMTLoss(loss_cfg), None
     return SegmentationLoss(loss_cfg), AuxiliaryLoss(cfg.get("aux_loss", {}))
 
 
@@ -114,20 +120,20 @@ def _log_fields(train_metrics: dict[str, float], val_metrics: dict[str, float] |
         if key not in train_keys and key not in METRIC_KEYS and any(key.startswith(prefix) for prefix in DEBUG_METRIC_PREFIXES)
     )
     fields.extend(f"train_{key}" for key in train_keys)
-    fields.append("val_loss")
-    fields.extend(f"val_{key}" for key in METRIC_KEYS)
-    fields.extend(f"val_{key}" for key in ALWAYS_LOG_METRICS if f"val_{key}" not in fields)
+
+    val_keys = ["loss", "main_loss", "aux_loss"]
+    val_metric_keys = set(train_metrics)
     if val_metrics:
-        fields.extend(
-            f"val_{key}"
-            for key in sorted(val_metrics)
-            if key.endswith("_loss") and key != "loss" and f"val_{key}" not in fields
-        )
-        fields.extend(
-            f"val_{key}"
-            for key in sorted(val_metrics)
-            if any(key.startswith(prefix) for prefix in DEBUG_METRIC_PREFIXES) and f"val_{key}" not in fields
-        )
+        val_metric_keys.update(val_metrics)
+    val_keys.extend(key for key in sorted(val_metric_keys) if key.endswith("_loss") and key not in val_keys)
+    val_keys.extend(key for key in ALWAYS_LOG_METRICS if key not in val_keys)
+    val_keys.extend(METRIC_KEYS)
+    val_keys.extend(
+        key
+        for key in sorted(val_metric_keys)
+        if key not in val_keys and key not in METRIC_KEYS and any(key.startswith(prefix) for prefix in DEBUG_METRIC_PREFIXES)
+    )
+    fields.extend(f"val_{key}" for key in val_keys)
     return fields
 
 
@@ -194,9 +200,17 @@ def _init_log_txt(path: Path, cfg: dict[str, Any], model) -> None:
 def _append_epoch_log(path: Path, epoch: int, lr: float, train_metrics: dict[str, float], val_metrics: dict[str, float] | None) -> None:
     fields = _log_fields(train_metrics, val_metrics)
     has_header = False
+    header_matches = False
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
-            has_header = any(line.startswith("epoch,") for line in f)
+            for line in f:
+                if line.startswith("epoch,"):
+                    has_header = True
+                    header_matches = line.rstrip("\n").split(",") == fields
+                    break
+        if has_header and not header_matches:
+            path.replace(path.with_suffix(path.suffix + ".bad_header.bak"))
+            has_header = False
     if not has_header:
         with open(path, "a", encoding="utf-8") as f:
             f.write(",".join(fields) + "\n")
@@ -258,11 +272,18 @@ def _inner_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _supports_fgm_bank(model) -> bool:
+    return hasattr(_inner_model(model), "new_fgm_bank")
+
+
 def _new_fgm_bank(model, ablation: dict[str, Any] | None = None):
     return _inner_model(model).new_fgm_bank(ablation)
 
 
 def _stateful_bank_enabled(cfg: dict[str, Any], mode: str) -> bool:
+    model_name = str((cfg.get("model", {}) or {}).get("name", "B23TFCUCCMFGMLiteModel"))
+    if model_name == "B23VideoMTWindowModel":
+        return False
     bank_cfg = cfg.get("fgm_bank", {}) or {}
     if mode == "train":
         return bool(bank_cfg.get("stateful_train", bank_cfg.get("train_full_video_windows", False)))
@@ -390,9 +411,12 @@ def evaluate(
     epoch: int = 10**9,
     include_aux_losses: bool = True,
 ):
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     model.eval()
     meters = {key: AverageMeter() for key in ["loss", "iou", "f1", "precision", "recall", "accuracy"]}
-    use_stateful_bank = _stateful_bank_enabled(cfg, "eval")
+    supports_fgm_bank = _supports_fgm_bank(model)
+    use_stateful_bank = supports_fgm_bank and _stateful_bank_enabled(cfg, "eval")
     reset_on_new_video = _reset_bank_on_new_video(cfg)
     fgm_bank = None
     current_video_id = None
@@ -410,7 +434,10 @@ def evaluate(
                 current_video_id = video_id
         else:
             fgm_bank = None
-        out = model(images, mode="eval", ablation=ablation, fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank)
+        if supports_fgm_bank:
+            out = model(images, mode="eval", ablation=ablation, fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank)
+        else:
+            out = model(images, mode="eval", ablation=ablation)
         if use_stateful_bank:
             fgm_bank = out.get("fgm_bank", fgm_bank)
         logits, target = align_logits_masks(out["logits"], masks)
@@ -453,6 +480,8 @@ def evaluate(
         if reset_on_new_video and use_stateful_bank and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
             fgm_bank = None
             current_video_id = None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return {key: meter.avg for key, meter in meters.items()}
 
 
@@ -465,6 +494,7 @@ def _print_param_report(model) -> None:
     print(f"Task adapter trainable params: {count_trainable_by_keyword(model, ('task_adapter.',))}")
     print(f"TCU unravel trainable params: {count_trainable_by_keyword(model, ('tcu.',))}")
     print(f"TTF temporal encoder trainable params: {count_trainable_by_keyword(model, ('temporal_fusion.', 'ttf'))}")
+    print(f"VidEoMT query trainable params: {count_trainable_by_keyword(model, ('query_fusion.', 'feature_proj.'))}")
     print(f"SUMI heads trainable params: {count_trainable_by_keyword(model, ('sumi_heads.',))}")
     print(f"decoder trainable params: {count_trainable_by_keyword(model, ('decoder.',))}")
 
@@ -484,7 +514,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
         # Full-video/stateful validation has uneven video-window counts per rank.
         # Rank 0 runs complete validation on the unwrapped model while others wait.
         main_val_loader = make_loader(cfg, "val", distributed=False)
-    model = B23TFCUCCMFGMLiteModel(cfg).to(device)
+    model = build_model(cfg).to(device)
     if is_main_process():
         _print_param_report(model)
         _init_log_txt(log_txt, cfg, model)
@@ -525,7 +555,8 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
         if distributed and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         train_meters: dict[str, AverageMeter] = {"loss": AverageMeter()}
-        use_stateful_bank = _stateful_bank_enabled(cfg, "train")
+        supports_fgm_bank = _supports_fgm_bank(model)
+        use_stateful_bank = supports_fgm_bank and _stateful_bank_enabled(cfg, "train")
         reset_on_new_video = _reset_bank_on_new_video(cfg)
         fgm_bank = None
         current_video_id = None
@@ -547,7 +578,10 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
             else:
                 fgm_bank = None
             with torch.cuda.amp.autocast(enabled=bool(cfg.get("amp", True)) and torch.cuda.is_available()):
-                out = model(images, mode="train", fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank, epoch=epoch)
+                if supports_fgm_bank:
+                    out = model(images, mode="train", fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank, epoch=epoch)
+                else:
+                    out = model(images, mode="train", epoch=epoch)
                 if use_stateful_bank:
                     fgm_bank = out.get("fgm_bank", fgm_bank)
                 logits, target = align_logits_masks(out["logits"], masks)
@@ -691,7 +725,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                 print(f"[checkpoint] skipped latest save because model has non-finite tensors: {bad_state}")
             else:
                 save_checkpoint(Path(save_dir) / "latest.pt", model, optimizer, scheduler, epoch, metrics, cfg)
-            append_csv(Path(save_dir) / "log.csv", metrics)
+            _append_epoch_log(Path(save_dir) / "log.csv", epoch, _current_lr(optimizer), train_metrics, val_metrics)
             _append_epoch_log(log_txt, epoch, _current_lr(optimizer), train_metrics, val_metrics)
 
     if distributed:

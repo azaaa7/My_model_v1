@@ -36,11 +36,12 @@ class LiteBoundaryDecoder(nn.Module):
         ch128 = int(stages[1].get("channels", 48))
         ch256 = int(stages[2].get("channels", 16))
         self.final_upsample = str(cfg.get("final_upsample", "bilinear"))
+        self.mask128_enabled = bool((cfg.get("mask128_head", {}) or {}).get("enabled", True))
         self.boundary_enabled = bool((cfg.get("boundary_head", {}) or {}).get("enabled", True))
 
         self.up64 = ConvBNAct(in_channels, ch64)
         self.up128 = ConvBNAct(ch64, ch128)
-        self.mask_head128 = nn.Conv2d(ch128, 1, 1)
+        self.mask_head128 = nn.Conv2d(ch128, 1, 1) if self.mask128_enabled else None
         self.boundary_head128 = nn.Conv2d(ch128, 1, 1) if self.boundary_enabled else None
         self.up256 = ConvBNAct(ch128, ch256)
         self.mask_head256 = nn.Conv2d(ch256, 1, 1)
@@ -54,7 +55,7 @@ class LiteBoundaryDecoder(nn.Module):
         f128 = F.interpolate(f64, scale_factor=2, mode="bilinear", align_corners=False)
         f128 = self.up128(f128)
         debug["decoder_f128_shape"] = tuple(f128.shape)
-        mask128 = self.mask_head128(f128)
+        mask128 = self.mask_head128(f128) if self.mask_head128 is not None else None
         boundary128 = self.boundary_head128(f128) if self.boundary_head128 is not None else None
 
         f256 = F.interpolate(f128, scale_factor=2, mode="bilinear", align_corners=False)
@@ -70,4 +71,3 @@ class LiteBoundaryDecoder(nn.Module):
             "logits": logits,
             "debug": debug,
         }
-
