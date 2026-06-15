@@ -117,12 +117,13 @@ videomt:
     mask_resolution: 128
     upsample_to_input: true
     score_head:
-      enabled: false
+      enabled: true
       hidden_dim: 256
+      bias_init: -2.0
     aggregation:
       type: "logsumexp"
       temperature: 1.0
-      use_query_score: false
+      use_query_score: true
       normalize_logsumexp: true
 
 tfcu:
@@ -160,15 +161,16 @@ loss:
   dice_weight: 1.0
   query_mask:
     enabled: true
-    bce_weight: 0.5
-    dice_weight: 0.5
+    bce_weight: 0.3
+    dice_weight: 0.3
+    warmup_epochs: 5
     matching:
       type: "hungarian_connected_components"
       max_components: 32
       min_component_area: 16
     no_object:
       enabled: true
-      weight: 0.1
+      weight: 0.05
   edge_weight: 0.05
   edge_kernel_size: 5
   use_pos_weight: true
@@ -178,7 +180,7 @@ loss:
 optimizer:
   type: "adamw"
   learning_rate: 1.0e-4
-  lr_lora: 5.0e-5
+  lr_lora: 2.0e-5
   lr_decoder: 1.0e-4
   lr_query: 1.0e-4
   lr_mask_head: 1.0e-4

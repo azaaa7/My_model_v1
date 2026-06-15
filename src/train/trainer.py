@@ -63,6 +63,7 @@ ALWAYS_LOG_METRICS = (
     "loss_query_bce",
     "loss_query_dice",
     "loss_query_no_object",
+    "loss_query_weight_scale",
     "loss_tda",
     "tda_weight",
 )
@@ -335,6 +336,15 @@ def _batch_bool(batch: dict[str, Any], key: str, default: bool = False) -> bool:
     return bool(_batch_first(batch.get(key), default))
 
 
+def _has_videomt_state_meta(batch) -> bool:
+    return (
+        isinstance(batch, dict)
+        and "video_id" in batch
+        and "is_first_window" in batch
+        and "is_last_window" in batch
+    )
+
+
 def _valid_mask_from_batch(batch, device) -> torch.Tensor | None:
     if not isinstance(batch, dict) or "valid_mask" not in batch:
         return None
@@ -467,13 +477,14 @@ def evaluate(
                 current_video_id = video_id
         else:
             fgm_bank = None
-        if use_videomt_stateful and isinstance(batch, dict):
+        can_use_videomt_state = use_videomt_stateful and _has_videomt_state_meta(batch)
+        if can_use_videomt_state:
             video_id = _batch_str(batch, "video_id", _name)
             should_reset = videomt_state is None or video_id != current_video_id or _batch_bool(batch, "is_first_window", False)
             if should_reset:
                 videomt_state = None
                 current_video_id = video_id
-        elif not use_videomt_stateful:
+        else:
             videomt_state = None
 
         if _is_videomt_model(cfg):
@@ -482,7 +493,7 @@ def evaluate(
                 mode="eval",
                 ablation=ablation,
                 videomt_state=videomt_state,
-                return_videomt_state=use_videomt_stateful,
+                return_videomt_state=can_use_videomt_state,
             )
         elif supports_fgm_bank:
             out = model(images, mode="eval", ablation=ablation, fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank)
@@ -490,7 +501,7 @@ def evaluate(
             out = model(images, mode="eval", ablation=ablation)
         if use_stateful_bank:
             fgm_bank = out.get("fgm_bank", fgm_bank)
-        if use_videomt_stateful:
+        if can_use_videomt_state:
             videomt_state = out.get("videomt_state", videomt_state)
         logits, target = align_logits_masks(out["logits"], masks)
         valid_mask = _valid_mask_from_batch(batch, device)
@@ -532,7 +543,7 @@ def evaluate(
         if reset_on_new_video and use_stateful_bank and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
             fgm_bank = None
             current_video_id = None
-        if use_videomt_stateful and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
+        if can_use_videomt_state and _batch_bool(batch, "is_last_window", False):
             videomt_state = None
             current_video_id = None
     if torch.cuda.is_available():
@@ -639,13 +650,14 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                     current_video_id = video_id
             else:
                 fgm_bank = None
-            if use_videomt_stateful and isinstance(batch, dict):
+            can_use_videomt_state = use_videomt_stateful and _has_videomt_state_meta(batch)
+            if can_use_videomt_state:
                 video_id = _batch_str(batch, "video_id", _name)
                 should_reset = videomt_state is None or video_id != current_video_id or _batch_bool(batch, "is_first_window", False)
                 if should_reset:
                     videomt_state = None
                     current_video_id = video_id
-            elif not use_videomt_stateful:
+            else:
                 videomt_state = None
             with torch.cuda.amp.autocast(enabled=bool(cfg.get("amp", True)) and torch.cuda.is_available()):
                 if _is_videomt_model(cfg):
@@ -654,7 +666,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                         mode="train",
                         epoch=epoch,
                         videomt_state=videomt_state,
-                        return_videomt_state=use_videomt_stateful,
+                        return_videomt_state=can_use_videomt_state,
                     )
                 elif supports_fgm_bank:
                     out = model(images, mode="train", fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank, epoch=epoch)
@@ -662,7 +674,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                     out = model(images, mode="train", epoch=epoch)
                 if use_stateful_bank:
                     fgm_bank = out.get("fgm_bank", fgm_bank)
-                if use_videomt_stateful:
+                if can_use_videomt_state:
                     videomt_state = out.get("videomt_state", videomt_state)
                 logits, target = align_logits_masks(out["logits"], masks)
                 valid_mask = _valid_mask_from_batch(batch, device)
@@ -751,7 +763,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                         f" window={_batch_first(batch.get('window_id'), '')}"
                         f" bank={len(fgm_bank) if fgm_bank is not None else 0}"
                     )
-                elif use_videomt_stateful and isinstance(batch, dict):
+                elif can_use_videomt_state:
                     state_text = (
                         f" video={_batch_str(batch, 'video_id', _name)}"
                         f" window={_batch_first(batch.get('window_id'), '')}"
@@ -767,7 +779,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
             if reset_on_new_video and use_stateful_bank and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
                 fgm_bank = None
                 current_video_id = None
-            if use_videomt_stateful and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
+            if can_use_videomt_state and _batch_bool(batch, "is_last_window", False):
                 videomt_state = None
                 current_video_id = None
 

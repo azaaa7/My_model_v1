@@ -58,7 +58,7 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
             groups["sumi"]["params"].append(param)
         elif ".forensic_branch." in clean:
             groups["forensic"]["params"].append(param)
-        elif ".decoder." in clean or ".feature_proj." in clean:
+        elif "decoder." in clean or "feature_proj." in clean:
             groups["decoder"]["params"].append(param)
         else:
             groups["other"]["params"].append(param)

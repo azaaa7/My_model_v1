@@ -121,12 +121,14 @@
       "upsample_to_input": true,
       "score_head": {
         "enabled": true,
-        "hidden_dim": 256
+        "hidden_dim": 256,
+        "bias_init": -2.0
       },
       "aggregation": {
         "type": "logsumexp",
         "temperature": 1.0,
-        "use_query_score": true
+        "use_query_score": true,
+        "normalize_logsumexp": true
       }
     }
   },
@@ -183,8 +185,9 @@
     "dice_weight": 1.0,
     "query_mask": {
       "enabled": true,
-      "bce_weight": 0.5,
-      "dice_weight": 0.5,
+      "bce_weight": 0.3,
+      "dice_weight": 0.3,
+      "warmup_epochs": 5,
       "matching": {
         "type": "hungarian_connected_components",
         "max_components": 32,
@@ -196,7 +199,7 @@
       },
       "no_object": {
         "enabled": true,
-        "weight": 0.1
+        "weight": 0.05
       }
     },
     "edge_weight": 0.05,
@@ -208,7 +211,7 @@
   "optimizer": {
     "type": "adamw",
     "learning_rate": 0.0001,
-    "lr_lora": 5e-05,
+    "lr_lora": 2e-05,
     "lr_decoder": 0.0001,
     "lr_query": 0.0001,
     "lr_mask_head": 0.0001,

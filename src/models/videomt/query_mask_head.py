@@ -46,6 +46,8 @@ class QueryMaskHead(nn.Module):
             nn.GELU(),
             nn.Linear(score_hidden, 1),
         ) if self.use_score else None
+        if self.score_head is not None:
+            nn.init.constant_(self.score_head[-1].bias, float(score_cfg.get("bias_init", -2.0)))
 
         agg_cfg = cfg.get("aggregation", {}) or {}
         self.aggregation = str(agg_cfg.get("type", "logsumexp"))

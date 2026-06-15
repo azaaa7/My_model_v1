@@ -94,6 +94,7 @@ class VideoMTQueryMaskLoss(nn.Module):
         self.query_enabled = bool(qcfg.get("enabled", True))
         self.query_bce_weight = float(qcfg.get("bce_weight", 0.5))
         self.query_dice_weight = float(qcfg.get("dice_weight", 0.5))
+        self.query_warmup_epochs = int(qcfg.get("warmup_epochs", 0))
         mcfg = qcfg.get("matching", {}) or {}
         self.max_components = int(mcfg.get("max_components", 32))
         self.min_component_area = int(mcfg.get("min_component_area", 16))
@@ -199,6 +200,11 @@ class VideoMTQueryMaskLoss(nn.Module):
             loss_no_obj = zero
         return loss_q_bce, loss_q_dice, loss_no_obj
 
+    def _query_weight_scale(self, epoch: int | None) -> float:
+        if self.query_warmup_epochs <= 0 or epoch is None:
+            return 1.0
+        return min(1.0, max(0.0, float(epoch + 1) / float(self.query_warmup_epochs)))
+
     def forward(
         self,
         outputs,
@@ -207,7 +213,6 @@ class VideoMTQueryMaskLoss(nn.Module):
         epoch: int | None = None,
         include_aux: bool = True,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del epoch
         logits, aux = self._extract_logits_and_aux(outputs, aux)
         logits, masks = self._align_logits_masks(logits, targets)
         logits_2d = self._flatten_2d(logits)
@@ -224,13 +229,14 @@ class VideoMTQueryMaskLoss(nn.Module):
             loss_q_bce, loss_q_dice, loss_q_no_obj = self._query_loss(aux, masks, zero)
         else:
             loss_q_bce, loss_q_dice, loss_q_no_obj = zero, zero, zero
+        query_weight_scale = self._query_weight_scale(epoch) if include_aux else 0.0
         total = (
             self.bce_weight * loss_bce
             + self.dice_weight * loss_dice
             + self.edge_weight * loss_edge
-            + self.query_bce_weight * loss_q_bce
-            + self.query_dice_weight * loss_q_dice
-            + self.no_object_weight * loss_q_no_obj
+            + query_weight_scale * self.query_bce_weight * loss_q_bce
+            + query_weight_scale * self.query_dice_weight * loss_q_dice
+            + query_weight_scale * self.no_object_weight * loss_q_no_obj
         )
         items = {
             "loss_total": float(total.detach().cpu()),
@@ -239,6 +245,7 @@ class VideoMTQueryMaskLoss(nn.Module):
             "loss_query_bce": float(loss_q_bce.detach().cpu()),
             "loss_query_dice": float(loss_q_dice.detach().cpu()),
             "loss_query_no_object": float(loss_q_no_obj.detach().cpu()),
+            "loss_query_weight_scale": float(query_weight_scale),
             "loss_edge": float(loss_edge.detach().cpu()),
             "main_loss": float(total.detach().cpu()),
         }
