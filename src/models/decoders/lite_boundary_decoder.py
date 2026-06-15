@@ -38,13 +38,14 @@ class LiteBoundaryDecoder(nn.Module):
         self.final_upsample = str(cfg.get("final_upsample", "bilinear"))
         self.mask128_enabled = bool((cfg.get("mask128_head", {}) or {}).get("enabled", True))
         self.boundary_enabled = bool((cfg.get("boundary_head", {}) or {}).get("enabled", True))
+        self.mask256_enabled = bool((cfg.get("mask256_head", {}) or {}).get("enabled", True))
 
         self.up64 = ConvBNAct(in_channels, ch64)
         self.up128 = ConvBNAct(ch64, ch128)
         self.mask_head128 = nn.Conv2d(ch128, 1, 1) if self.mask128_enabled else None
         self.boundary_head128 = nn.Conv2d(ch128, 1, 1) if self.boundary_enabled else None
-        self.up256 = ConvBNAct(ch128, ch256)
-        self.mask_head256 = nn.Conv2d(ch256, 1, 1)
+        self.up256 = ConvBNAct(ch128, ch256) if self.mask256_enabled else None
+        self.mask_head256 = nn.Conv2d(ch256, 1, 1) if self.mask256_enabled else None
 
     def forward(self, f32: torch.Tensor) -> dict[str, torch.Tensor | dict]:
         debug = {"decoder_input_shape": tuple(f32.shape)}
@@ -58,16 +59,20 @@ class LiteBoundaryDecoder(nn.Module):
         mask128 = self.mask_head128(f128) if self.mask_head128 is not None else None
         boundary128 = self.boundary_head128(f128) if self.boundary_head128 is not None else None
 
-        f256 = F.interpolate(f128, scale_factor=2, mode="bilinear", align_corners=False)
-        f256 = self.up256(f256)
-        debug["decoder_f256_shape"] = tuple(f256.shape)
-        mask256 = self.mask_head256(f256)
-        logits = F.interpolate(mask256, scale_factor=2, mode="bilinear", align_corners=False)
-        debug["decoder_logit512_shape"] = tuple(logits.shape)
+        mask256 = None
+        logits = None
+        if self.up256 is not None and self.mask_head256 is not None:
+            f256 = F.interpolate(f128, scale_factor=2, mode="bilinear", align_corners=False)
+            f256 = self.up256(f256)
+            debug["decoder_f256_shape"] = tuple(f256.shape)
+            mask256 = self.mask_head256(f256)
+            logits = F.interpolate(mask256, scale_factor=2, mode="bilinear", align_corners=False)
+            debug["decoder_logit512_shape"] = tuple(logits.shape)
         return {
             "mask128": mask128,
             "boundary128": boundary128,
             "mask256": mask256,
             "logits": logits,
+            "features128": f128,
             "debug": debug,
         }

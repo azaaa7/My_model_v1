@@ -4,6 +4,7 @@ import builtins
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,18 @@ def setup_for_distributed(is_master: bool) -> None:
     builtins.print = print
 
 
+def _distributed_timeout(ddp_cfg: dict[str, Any]) -> timedelta:
+    if "timeout_seconds" in ddp_cfg:
+        seconds = float(ddp_cfg.get("timeout_seconds", 7200))
+    elif "timeout_minutes" in ddp_cfg:
+        seconds = float(ddp_cfg.get("timeout_minutes", 120)) * 60.0
+    else:
+        # Full-video validation can legitimately make non-main ranks wait for
+        # longer than PyTorch/NCCL's 10-minute default timeout.
+        seconds = 7200.0
+    return timedelta(seconds=max(1.0, seconds))
+
+
 def init_distributed_mode(cfg: dict[str, Any]) -> tuple[bool, int, int, int]:
     ddp_cfg = cfg.get("ddp", {})
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -43,8 +56,15 @@ def init_distributed_mode(cfg: dict[str, Any]) -> tuple[bool, int, int, int]:
     if not torch.cuda.is_available():
         raise RuntimeError("DDP training requires CUDA")
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend=str(ddp_cfg.get("dist_backend", "nccl")), init_method="env://")
-    dist.barrier()
+    dist.init_process_group(
+        backend=str(ddp_cfg.get("dist_backend", "nccl")),
+        init_method="env://",
+        timeout=_distributed_timeout(ddp_cfg),
+    )
+    if str(ddp_cfg.get("dist_backend", "nccl")).lower() == "nccl":
+        dist.barrier(device_ids=[local_rank])
+    else:
+        dist.barrier()
     setup_for_distributed(rank == 0)
     return True, rank, local_rank, world_size
 

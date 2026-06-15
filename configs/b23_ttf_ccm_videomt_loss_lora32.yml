@@ -172,6 +172,7 @@ ddp:
   cuda_visible_devices: "4,5"
   nproc_per_node: 2
   dist_backend: "nccl"
+  timeout_minutes: 120
   find_unused_parameters: false
   pytorch_cuda_alloc_conf: "expandable_segments:True"
   torchrun_log_dir: "runs/b23_ttf_ccm_videomt_loss_lora32/torchrun_logs"

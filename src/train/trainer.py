@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from src.data import build_dataloader
 from src.eval.metrics import AverageMeter, binary_metrics_from_logits
-from src.losses import AuxiliaryLoss, CompositeForensicLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss, VideoMTLoss
+from src.losses import AuxiliaryLoss, CompositeForensicLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss, VideoMTLoss, VideoMTQueryMaskLoss
 from src.models.builder import build_model
 from src.models.b23_tfcu_ccm_fgm_model import count_parameters, count_trainable_by_keyword
 from src.train.checkpoint import load_checkpoint, save_checkpoint
@@ -60,6 +60,9 @@ ALWAYS_LOG_METRICS = (
     "loss_focal_bce",
     "loss_dice",
     "loss_edge",
+    "loss_query_bce",
+    "loss_query_dice",
+    "loss_query_no_object",
     "loss_tda",
     "tda_weight",
 )
@@ -87,6 +90,8 @@ def build_loss(cfg: dict[str, Any]):
         return CompositeForensicLoss(loss_cfg), None
     if loss_type == "ttf_minimal":
         return TTFMinimalLoss(loss_cfg), None
+    if loss_type == "videomt_query_mask":
+        return VideoMTQueryMaskLoss(loss_cfg), None
     if loss_type == "videomt" or loss_name == "videomtloss":
         return VideoMTLoss(loss_cfg), None
     return SegmentationLoss(loss_cfg), AuxiliaryLoss(cfg.get("aux_loss", {}))
@@ -249,6 +254,7 @@ def make_loader(cfg: dict[str, Any], mode: str, distributed: bool = False, rank:
         use_tfcu_adapter=True,
         test_max_clips=test_max_clips,
         train_full_video_windows=bool(bank_cfg.get("train_full_video_windows", cfg.get("train_full_video_windows", False))),
+        train_max_windows_per_video=int(cfg.get("train_max_windows_per_video", 0) or 0),
         val_full_video=bool(cfg.get("val_full_video", False)),
         test_full_video=bool(cfg.get("test_full_video", True)),
         temporal_augment=cfg.get("temporal_augment", {}) or {},
@@ -289,6 +295,19 @@ def _stateful_bank_enabled(cfg: dict[str, Any], mode: str) -> bool:
         return bool(bank_cfg.get("stateful_train", bank_cfg.get("train_full_video_windows", False)))
     default_eval = bool(cfg.get("val_full_video", False) or cfg.get("test_full_video", False))
     return bool(bank_cfg.get("stateful_eval", default_eval))
+
+
+def _is_videomt_model(cfg: dict[str, Any]) -> bool:
+    return str((cfg.get("model", {}) or {}).get("name", "")) == "B23VideoMTWindowModel"
+
+
+def _videomt_stateful_enabled(cfg: dict[str, Any], mode: str) -> bool:
+    if not _is_videomt_model(cfg):
+        return False
+    prop_cfg = ((cfg.get("videomt", {}) or {}).get("propagation", {}) or {})
+    if mode == "train":
+        return bool(prop_cfg.get("stateful_windows", False))
+    return bool(prop_cfg.get("carry_state_in_eval", True))
 
 
 def _reset_bank_on_new_video(cfg: dict[str, Any]) -> bool:
@@ -333,6 +352,8 @@ def _filter_by_valid_mask(logits: torch.Tensor, target: torch.Tensor, aux: dict[
     def filter_tensor(x: torch.Tensor | None):
         if x is None or not torch.is_tensor(x):
             return x
+        if x.ndim >= valid_mask.ndim + 1 and tuple(x.shape[:valid_mask.ndim]) == tuple(valid_mask.shape):
+            return x.reshape(-1, *x.shape[valid_mask.ndim:])[valid]
         if x.ndim >= valid_mask.ndim + 3 and tuple(x.shape[:valid_mask.ndim]) == tuple(valid_mask.shape):
             return x.reshape(-1, x.shape[-3], x.shape[-2], x.shape[-1])[valid]
         return x
@@ -358,6 +379,16 @@ def _distributed_any(flag: bool, device: torch.device) -> bool:
         dist.all_reduce(value, op=dist.ReduceOp.MAX)
         return bool(value.item())
     return bool(flag)
+
+
+def _distributed_barrier(device: torch.device) -> None:
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    if dist.get_backend().lower() == "nccl" and device.type == "cuda":
+        current = device.index if device.index is not None else torch.cuda.current_device()
+        dist.barrier(device_ids=[current])
+    else:
+        dist.barrier()
 
 
 def _grad_norm_and_finite(params: list[torch.nn.Parameter], max_norm: float) -> tuple[torch.Tensor, bool]:
@@ -417,8 +448,10 @@ def evaluate(
     meters = {key: AverageMeter() for key in ["loss", "iou", "f1", "precision", "recall", "accuracy"]}
     supports_fgm_bank = _supports_fgm_bank(model)
     use_stateful_bank = supports_fgm_bank and _stateful_bank_enabled(cfg, "eval")
+    use_videomt_stateful = _videomt_stateful_enabled(cfg, "eval")
     reset_on_new_video = _reset_bank_on_new_video(cfg)
     fgm_bank = None
+    videomt_state = None
     current_video_id = None
     for batch in loader:
         images, masks, _name = unpack_batch(batch)
@@ -434,12 +467,31 @@ def evaluate(
                 current_video_id = video_id
         else:
             fgm_bank = None
-        if supports_fgm_bank:
+        if use_videomt_stateful and isinstance(batch, dict):
+            video_id = _batch_str(batch, "video_id", _name)
+            should_reset = videomt_state is None or video_id != current_video_id or _batch_bool(batch, "is_first_window", False)
+            if should_reset:
+                videomt_state = None
+                current_video_id = video_id
+        elif not use_videomt_stateful:
+            videomt_state = None
+
+        if _is_videomt_model(cfg):
+            out = model(
+                images,
+                mode="eval",
+                ablation=ablation,
+                videomt_state=videomt_state,
+                return_videomt_state=use_videomt_stateful,
+            )
+        elif supports_fgm_bank:
             out = model(images, mode="eval", ablation=ablation, fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank)
         else:
             out = model(images, mode="eval", ablation=ablation)
         if use_stateful_bank:
             fgm_bank = out.get("fgm_bank", fgm_bank)
+        if use_videomt_stateful:
+            videomt_state = out.get("videomt_state", videomt_state)
         logits, target = align_logits_masks(out["logits"], masks)
         valid_mask = _valid_mask_from_batch(batch, device)
         logits, target, aux = _filter_by_valid_mask(logits, target, out["aux"], valid_mask)
@@ -480,6 +532,9 @@ def evaluate(
         if reset_on_new_video and use_stateful_bank and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
             fgm_bank = None
             current_video_id = None
+        if use_videomt_stateful and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
+            videomt_state = None
+            current_video_id = None
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return {key: meter.avg for key, meter in meters.items()}
@@ -494,7 +549,10 @@ def _print_param_report(model) -> None:
     print(f"Task adapter trainable params: {count_trainable_by_keyword(model, ('task_adapter.',))}")
     print(f"TCU unravel trainable params: {count_trainable_by_keyword(model, ('tcu.',))}")
     print(f"TTF temporal encoder trainable params: {count_trainable_by_keyword(model, ('temporal_fusion.', 'ttf'))}")
-    print(f"VidEoMT query trainable params: {count_trainable_by_keyword(model, ('query_fusion.', 'feature_proj.'))}")
+    print(
+        "VidEoMT query trainable params: "
+        f"{count_trainable_by_keyword(model, ('query_fusion.', 'query_controller.', 'query_mask_head.', 'feature_proj.'))}"
+    )
     print(f"SUMI heads trainable params: {count_trainable_by_keyword(model, ('sumi_heads.',))}")
     print(f"decoder trainable params: {count_trainable_by_keyword(model, ('decoder.',))}")
 
@@ -554,11 +612,15 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
         model.train()
         if distributed and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
         train_meters: dict[str, AverageMeter] = {"loss": AverageMeter()}
         supports_fgm_bank = _supports_fgm_bank(model)
         use_stateful_bank = supports_fgm_bank and _stateful_bank_enabled(cfg, "train")
+        use_videomt_stateful = _videomt_stateful_enabled(cfg, "train")
         reset_on_new_video = _reset_bank_on_new_video(cfg)
         fgm_bank = None
+        videomt_state = None
         current_video_id = None
         nonfinite_skips = 0
         consecutive_nonfinite = 0
@@ -577,13 +639,31 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                     current_video_id = video_id
             else:
                 fgm_bank = None
+            if use_videomt_stateful and isinstance(batch, dict):
+                video_id = _batch_str(batch, "video_id", _name)
+                should_reset = videomt_state is None or video_id != current_video_id or _batch_bool(batch, "is_first_window", False)
+                if should_reset:
+                    videomt_state = None
+                    current_video_id = video_id
+            elif not use_videomt_stateful:
+                videomt_state = None
             with torch.cuda.amp.autocast(enabled=bool(cfg.get("amp", True)) and torch.cuda.is_available()):
-                if supports_fgm_bank:
+                if _is_videomt_model(cfg):
+                    out = model(
+                        images,
+                        mode="train",
+                        epoch=epoch,
+                        videomt_state=videomt_state,
+                        return_videomt_state=use_videomt_stateful,
+                    )
+                elif supports_fgm_bank:
                     out = model(images, mode="train", fgm_bank=fgm_bank, return_fgm_bank=use_stateful_bank, epoch=epoch)
                 else:
                     out = model(images, mode="train", epoch=epoch)
                 if use_stateful_bank:
                     fgm_bank = out.get("fgm_bank", fgm_bank)
+                if use_videomt_stateful:
+                    videomt_state = out.get("videomt_state", videomt_state)
                 logits, target = align_logits_masks(out["logits"], masks)
                 valid_mask = _valid_mask_from_batch(batch, device)
                 logits, target, aux = _filter_by_valid_mask(logits, target, out["aux"], valid_mask)
@@ -607,6 +687,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                 consecutive_nonfinite += 1
                 optimizer.zero_grad(set_to_none=True)
                 fgm_bank = None
+                videomt_state = None
                 current_video_id = None
                 if is_main_process():
                     print(
@@ -627,6 +708,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                     consecutive_nonfinite += 1
                     optimizer.zero_grad(set_to_none=True)
                     fgm_bank = None
+                    videomt_state = None
                     current_video_id = None
                     if scaler.is_enabled():
                         scaler.update()
@@ -669,6 +751,12 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                         f" window={_batch_first(batch.get('window_id'), '')}"
                         f" bank={len(fgm_bank) if fgm_bank is not None else 0}"
                     )
+                elif use_videomt_stateful and isinstance(batch, dict):
+                    state_text = (
+                        f" video={_batch_str(batch, 'video_id', _name)}"
+                        f" window={_batch_first(batch.get('window_id'), '')}"
+                        f" qstate={1 if videomt_state is not None else 0}"
+                    )
                 print(
                     f"[train] epoch {epoch:04d} step {display_step:04d}/{len(train_loader):04d} "
                     f"loss {train_meters['loss'].avg:.4f} "
@@ -678,6 +766,9 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                 )
             if reset_on_new_video and use_stateful_bank and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
                 fgm_bank = None
+                current_video_id = None
+            if use_videomt_stateful and isinstance(batch, dict) and _batch_bool(batch, "is_last_window", False):
+                videomt_state = None
                 current_video_id = None
 
         if scheduler is not None:
@@ -699,7 +790,7 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                     metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
                 else:
                     val_metrics = None
-                dist.barrier()
+                _distributed_barrier(device)
             else:
                 val_metrics = evaluate(model, val_loader, criterion, aux_criterion, sumi_criterion, device, cfg, epoch=epoch)
                 metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
@@ -729,4 +820,4 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
             _append_epoch_log(log_txt, epoch, _current_lr(optimizer), train_metrics, val_metrics)
 
     if distributed:
-        dist.barrier()
+        _distributed_barrier(device)

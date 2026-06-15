@@ -13,6 +13,11 @@ def parse_lora_layers(value: str | Iterable[int] | None) -> list[int] | None:
     value = str(value).strip()
     if not value or value.lower() == "all":
         return None
+    lower = value.lower().replace("_", "")
+    if lower.startswith("last") and lower[4:].isdigit():
+        count = int(lower[4:])
+        total_blocks = 24
+        return list(range(max(0, total_blocks - count), total_blocks))
     if "-" in value and "," not in value:
         start, end = value.split("-", 1)
         return list(range(int(start), int(end) + 1))
@@ -68,4 +73,3 @@ def mark_only_lora_trainable(module: nn.Module) -> None:
 
 def count_lora_parameters(module: nn.Module) -> int:
     return sum(param.numel() for name, param in module.named_parameters() if "lora_" in name and param.requires_grad)
-

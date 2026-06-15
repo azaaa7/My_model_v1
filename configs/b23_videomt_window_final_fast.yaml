@@ -1,0 +1,227 @@
+type: train
+seed: 666666
+
+model:
+  name: "B23VideoMTWindowModel"
+  version: "videomt_encoder_query_mask_final_fast"
+  input_size: 512
+
+batch_size: 1
+num_clips: 1
+num_frames: 5
+clip_stride: 1
+encoder_chunk: 2
+gt_ratio: 1
+
+# Fast phase: keep ordered windows inside each video, but do not scan every
+# window in every epoch. This preserves stateful query training while making
+# each epoch much shorter.
+train_full_video_windows: true
+train_max_windows_per_video: 2
+
+train_samples:
+  - "./flist/DAVIS-VI_tra_DVI_30.npy"
+  - "./flist/DAVIS-VI_tra_CPNET_30.npy"
+
+val_samples:
+  - "./flist/DAVIS-VI_val_DVI_20.npy"
+  - "./flist/DAVIS-VI_val_CPNET_20.npy"
+
+test_samples:
+  - "./flist/DAVIS-VI_val_DVI_20.npy"
+  - "./flist/DAVIS-VI_val_CPNET_20.npy"
+  - "./flist/DAVIS-VI_val_OPN_20.npy"
+
+augment_prob: 0.70
+spatial_augment_prob: 0.70
+appearance_augment_prob: 0.40
+
+temporal_augment:
+  frame_swap:
+    enabled: true
+    prob: 0.05
+    start_epoch: 40
+    max_swaps: 1
+    local_radius: 2
+  frame_drop:
+    enabled: true
+    prob: 0.05
+    start_epoch: 40
+    max_drops: 1
+
+amp: true
+use_activation_checkpoint: true
+grad_accum_steps: 2
+num_workers: 4
+log_interval: 20
+
+dinov3:
+  repo: "./dinov3"
+  weights: "./dinov3/dinov3_weight/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+  model_name: "dinov3_vitl16"
+  input_size: 512
+  patch_size: 16
+  output_block: 23
+  output_resolution: 32
+  feature_dim: 1024
+  freeze_backbone: true
+  allow_hub_download: false
+  query_injection:
+    enabled: true
+    mode: "last_blocks"
+    inject_after_block: 19
+    query_blocks: [20, 21, 22, 23]
+    num_query_blocks: 4
+    keep_cls_token: true
+    patch_query_attention: true
+
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  layers: "last4"
+  targets: "attn.qkv,attn.proj,mlp.fc1,mlp.fc2"
+
+videomt:
+  enabled: true
+  dim: 1024
+  num_queries: 32
+  heads: 16
+  ffn_ratio: 4.0
+  dropout: 0.0
+  bidirectional: false
+  residual:
+    enabled: false
+    residual_alpha_init: 0.0
+  propagation:
+    enabled: true
+    type: "linear_plus_learned"
+    first_frame: "learned"
+    prev_linear: true
+    detach_within_window: false
+    stateful_windows: true
+    detach_across_windows: true
+    carry_state_in_eval: true
+    reset_state_per_video: true
+  query_fusion:
+    enabled: true
+    formula: "linear_prev_plus_learned"
+    linear_bias: true
+    linear_init: "xavier_uniform"
+  query_mask_head:
+    enabled: true
+    mask_dim: 256
+    mask_embed_mlp_layers: 3
+    mask_feature_source: "decoder_128"
+    mask_resolution: 128
+    upsample_to_input: true
+    score_head:
+      enabled: false
+      hidden_dim: 256
+    aggregation:
+      type: "logsumexp"
+      temperature: 1.0
+      use_query_score: false
+      normalize_logsumexp: true
+
+tfcu:
+  version: "videomt_window_final_fast"
+  ccm:
+    enabled: false
+  fgm:
+    enabled: false
+
+decoder:
+  type: "lite_boundary"
+  input_resolution: 32
+  in_channels: 128
+  stages:
+    - {resolution: 64, channels: 96}
+    - {resolution: 128, channels: 48}
+    - {resolution: 256, channels: 16}
+  final_upsample: "bilinear"
+  output_512_multichannel: false
+  export_features:
+    enabled: true
+    resolutions: [128]
+  mask128_head:
+    enabled: false
+  mask256_head:
+    enabled: false
+  boundary_head:
+    enabled: true
+    resolution: 128
+
+loss:
+  type: "videomt_query_mask"
+  name: "VideoMTQueryMaskLoss"
+  bce_weight: 1.0
+  dice_weight: 1.0
+  query_mask:
+    enabled: true
+    bce_weight: 0.5
+    dice_weight: 0.5
+    matching:
+      type: "hungarian_connected_components"
+      max_components: 32
+      min_component_area: 16
+    no_object:
+      enabled: true
+      weight: 0.1
+  edge_weight: 0.05
+  edge_kernel_size: 5
+  use_pos_weight: true
+  pos_weight: 2.0
+  dice_eps: 1.0e-6
+
+optimizer:
+  type: "adamw"
+  learning_rate: 1.0e-4
+  lr_lora: 5.0e-5
+  lr_decoder: 1.0e-4
+  lr_query: 1.0e-4
+  lr_mask_head: 1.0e-4
+  weight_decay: 1.0e-2
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+scheduler:
+  type: "poly"
+  warmup_epochs: 10
+  power: 0.9
+  min_lr: 1.0e-6
+
+val_full_video: true
+val_test_max_clips: 1
+val_num_workers: 0
+test_full_video: true
+test_max_clips: 9999
+
+train:
+  n_epochs: 300
+  save_dir: "runs/b23_videomt_window_final_fast"
+  val_interval: 20
+  max_grad_norm: 1.0
+  skip_nonfinite: true
+  save_best_by: "val_iou"
+
+stability:
+  logit_clamp: 30.0
+  nan_to_num: true
+
+ddp:
+  auto_torchrun: true
+  cuda_visible_devices: "4,5"
+  nproc_per_node: 2
+  dist_backend: "nccl"
+  timeout_minutes: 120
+  find_unused_parameters: false
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
+  torchrun_log_dir: "runs/b23_videomt_window_final_fast/torchrun_logs"
+  torchrun_tee: ""
+
+debug:
+  log_shapes: true
+  log_query_stats: true
+  log_query_assignment: false

@@ -23,35 +23,42 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
         "sumi": {"params": [], "lr": float(opt_cfg.get("lr_sumi", base_lr))},
         "forensic": {"params": [], "lr": float(opt_cfg.get("lr_forensic", base_lr))},
         "decoder": {"params": [], "lr": float(opt_cfg.get("lr_decoder", base_lr))},
+        "query": {"params": [], "lr": float(opt_cfg.get("lr_query", base_lr))},
+        "mask_head": {"params": [], "lr": float(opt_cfg.get("lr_mask_head", base_lr))},
         "other": {"params": [], "lr": base_lr},
     }
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if "lora_" in name:
+        clean = name[len("module."):] if name.startswith("module.") else name
+        if "lora_" in clean:
             groups["lora"]["params"].append(param)
-        elif "temporal_fusion" in name or "temporal_encoder" in name or "ttf" in name:
+        elif "query_controller." in clean:
+            groups["query"]["params"].append(param)
+        elif "query_mask_head." in clean:
+            groups["mask_head"]["params"].append(param)
+        elif "temporal_fusion" in clean or "temporal_encoder" in clean or "ttf" in clean:
             groups["temporal_encoder"]["params"].append(param)
-        elif ".ccm." in name:
+        elif ".ccm." in clean:
             groups["ccm"]["params"].append(param)
-        elif ".fgm." in name:
+        elif ".fgm." in clean:
             groups["fgm"]["params"].append(param)
-        elif ".reliability_gate." in name:
+        elif ".reliability_gate." in clean:
             groups["reliability_gate"]["params"].append(param)
-        elif ".prototype_memory." in name:
+        elif ".prototype_memory." in clean:
             groups["prototype_memory"]["params"].append(param)
-        elif ".noise_adapter." in name:
+        elif ".noise_adapter." in clean:
             groups["forensic_adapter"]["params"].append(param)
-        elif ".task_adapter." in name:
+        elif ".task_adapter." in clean:
             groups["task_adapter"]["params"].append(param)
-        elif ".tcu." in name:
+        elif ".tcu." in clean:
             groups["tcu"]["params"].append(param)
-        elif ".sumi_heads." in name:
+        elif ".sumi_heads." in clean:
             groups["sumi"]["params"].append(param)
-        elif ".forensic_branch." in name:
+        elif ".forensic_branch." in clean:
             groups["forensic"]["params"].append(param)
-        elif ".decoder." in name:
+        elif ".decoder." in clean or ".feature_proj." in clean:
             groups["decoder"]["params"].append(param)
         else:
             groups["other"]["params"].append(param)
@@ -61,4 +68,10 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
         if group["params"]:
             param_groups.append({"params": group["params"], "lr": group["lr"], "weight_decay": weight_decay, "name": name})
             print(f"[optimizer] group={name} params={sum(p.numel() for p in group['params'])} lr={group['lr']}")
-    return AdamW(param_groups, lr=base_lr, weight_decay=weight_decay)
+    return AdamW(
+        param_groups,
+        lr=base_lr,
+        weight_decay=weight_decay,
+        betas=tuple(opt_cfg.get("betas", [0.9, 0.999])),
+        eps=float(opt_cfg.get("eps", 1.0e-8)),
+    )

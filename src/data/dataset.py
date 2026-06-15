@@ -402,6 +402,7 @@ def _apply_temporal_index_augment(
     num_frames: int,
     stride: int,
     cfg: dict,
+    epoch: int = 0,
 ) -> tuple[list[list[int]], list[list[bool]], dict[str, int]]:
     """Apply temporal robustness perturbations to frame indices.
 
@@ -418,7 +419,8 @@ def _apply_temporal_index_augment(
         return _reshape_clip_indices(flat, num_clips, num_frames), _reshape_clip_indices(flat_valid, num_clips, num_frames), stats
 
     drop_cfg = (cfg.get("frame_drop", {}) or {}) if cfg else {}
-    if bool(drop_cfg.get("enabled", False)) and random.random() < float(drop_cfg.get("prob", 0.0)):
+    drop_start_epoch = int(drop_cfg.get("start_epoch", 0) or 0)
+    if bool(drop_cfg.get("enabled", False)) and epoch >= drop_start_epoch and random.random() < float(drop_cfg.get("prob", 0.0)):
         valid_positions = [pos for pos, is_valid in enumerate(flat_valid) if is_valid]
         max_drops = max(1, int(drop_cfg.get("max_drops", 1)))
         max_drops = min(max_drops, max(0, len(valid_positions) - 1))
@@ -441,7 +443,8 @@ def _apply_temporal_index_augment(
         stats["frame_drop_count"] = drop_count
 
     swap_cfg = (cfg.get("frame_swap", {}) or {}) if cfg else {}
-    if bool(swap_cfg.get("enabled", False)) and random.random() < float(swap_cfg.get("prob", 0.0)):
+    swap_start_epoch = int(swap_cfg.get("start_epoch", 0) or 0)
+    if bool(swap_cfg.get("enabled", False)) and epoch >= swap_start_epoch and random.random() < float(swap_cfg.get("prob", 0.0)):
         max_swaps = max(1, int(swap_cfg.get("max_swaps", 1)))
         radius = max(1, int(swap_cfg.get("local_radius", 2)))
         swap_count = random.randint(1, max_swaps)
@@ -495,6 +498,7 @@ class VideoInpaintingDataset(Dataset):
         use_tfcu_adapter: bool = False,
         test_max_clips: int = 4,
         train_full_video_windows: bool = False,
+        train_max_windows_per_video: int = 0,
         val_full_video: bool = False,
         test_full_video: bool = True,
         temporal_augment: dict | None = None,
@@ -519,9 +523,11 @@ class VideoInpaintingDataset(Dataset):
         self.clip_stride = clip_stride
         self.test_max_clips = test_max_clips
         self.train_full_video_windows = bool(train_full_video_windows)
+        self.train_max_windows_per_video = int(train_max_windows_per_video or 0)
         self.val_full_video = bool(val_full_video)
         self.test_full_video = bool(test_full_video)
         self.temporal_augment = temporal_augment or {}
+        self.epoch = 0
         self.use_train_windows = self.mode == "train" and self.train_full_video_windows and self.num_clips > 0
         self.use_eval_windows = (
             self.num_clips > 1
@@ -561,6 +567,8 @@ class VideoInpaintingDataset(Dataset):
                         num_frames=self.num_frames,
                         stride=self.clip_stride,
                     )
+                    if self.use_train_windows and self.train_max_windows_per_video > 0:
+                        windows = windows[: self.train_max_windows_per_video]
                     name = _derive_sample_name(video_dir)
                     state_video_id = f"{name}#rep{repeat_idx}" if repeats > 1 else name
                     self.window_video_order.append(state_video_id)
@@ -584,6 +592,9 @@ class VideoInpaintingDataset(Dataset):
         if (self.use_train_windows or self.use_eval_windows) and self.eval_items is not None:
             return len(self.eval_items)
         return len(self.samples) * self.dataset_repeat
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
 
     def __getitem__(self, idx: int):
         if (self.use_train_windows or self.use_eval_windows) and self.eval_items is not None:
@@ -732,6 +743,7 @@ class VideoInpaintingDataset(Dataset):
                 num_frames=self.num_frames,
                 stride=self.clip_stride,
                 cfg=self.temporal_augment,
+                epoch=self.epoch,
             )
 
         all_frames_np: list[list[np.ndarray]] = []
@@ -849,6 +861,19 @@ class VideoInpaintingDataset(Dataset):
             num_frames=self.num_frames,
             stride=self.clip_stride,
         )
+        temporal_stats = {"frame_drop_count": 0, "frame_swap_count": 0}
+        if self.mode == "train":
+            valid_mask = [[True] * self.num_frames for _ in range(actual_num_clips)]
+            all_clip_indices, _valid_mask, temporal_stats = _apply_temporal_index_augment(
+                all_clip_indices,
+                valid_mask,
+                video_length=video_length,
+                num_clips=actual_num_clips,
+                num_frames=self.num_frames,
+                stride=self.clip_stride,
+                cfg=self.temporal_augment,
+                epoch=self.epoch,
+            )
 
         all_frames_np: list[list[np.ndarray]] = []
         all_masks_np: list[list[np.ndarray]] = []
@@ -947,6 +972,7 @@ def build_dataloader(
     use_tfcu_adapter: bool = False,
     test_max_clips: int = 4,
     train_full_video_windows: bool = False,
+    train_max_windows_per_video: int = 0,
     val_full_video: bool = False,
     test_full_video: bool = True,
     temporal_augment: dict | None = None,
@@ -966,6 +992,7 @@ def build_dataloader(
         use_tfcu_adapter=use_tfcu_adapter,
         test_max_clips=test_max_clips,
         train_full_video_windows=train_full_video_windows,
+        train_max_windows_per_video=train_max_windows_per_video,
         val_full_video=val_full_video,
         test_full_video=test_full_video,
         temporal_augment=temporal_augment,
