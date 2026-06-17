@@ -208,6 +208,10 @@ train:
   val_interval: 10
   max_grad_norm: 1.0
   skip_nonfinite: true
+  checkpoint:
+    save_trainable_only: true
+    save_optimizer: true
+    save_scheduler: true
   ema:
     enabled: true
     decay: 0.999

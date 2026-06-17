@@ -206,6 +206,10 @@ train:
   val_interval: 20
   max_grad_norm: 1.0
   skip_nonfinite: true
+  checkpoint:
+    save_trainable_only: true
+    save_optimizer: true
+    save_scheduler: true
   save_best_by: "val_iou"
 
 stability:

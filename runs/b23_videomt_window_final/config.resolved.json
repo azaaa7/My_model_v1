@@ -243,6 +243,11 @@
     "val_interval": 10,
     "max_grad_norm": 1.0,
     "skip_nonfinite": true,
+    "checkpoint": {
+      "save_trainable_only": true,
+      "save_optimizer": true,
+      "save_scheduler": true
+    },
     "ema": {
       "enabled": true,
       "decay": 0.999
@@ -268,5 +273,6 @@
     "log_shapes": true,
     "log_query_stats": true,
     "log_query_assignment": false
-  }
+  },
+  "checkpoint": "runs/b23_videomt_window_final/best_iou.pt"
 }

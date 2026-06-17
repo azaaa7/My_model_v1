@@ -420,6 +420,15 @@ def _nonfinite_state_names(model, limit: int = 8) -> list[str]:
     return bad
 
 
+def _try_save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, metrics: dict[str, float], cfg: dict[str, Any]) -> bool:
+    try:
+        save_checkpoint(path, model, optimizer, scheduler, epoch, metrics, cfg)
+        return True
+    except Exception as exc:
+        print(f"[checkpoint] failed to save {path}: {type(exc).__name__}: {exc}")
+        return False
+
+
 def align_logits_masks(logits: torch.Tensor, masks: torch.Tensor):
     if masks.ndim == 4:
         # Single-clip train mode returns only the center-frame mask:
@@ -817,8 +826,8 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
                     print(f"[checkpoint] skipped best_iou save because model has non-finite tensors: {bad_state}")
                 else:
                     best_iou = val_metrics["iou"]
-                    save_checkpoint(Path(save_dir) / "best_iou.pt", model, optimizer, scheduler, epoch, val_metrics, cfg)
-                    print(f"[checkpoint] best_iou updated: {best_iou:.4f}")
+                    if _try_save_checkpoint(Path(save_dir) / "best_iou.pt", model, optimizer, scheduler, epoch, val_metrics, cfg):
+                        print(f"[checkpoint] best_iou updated: {best_iou:.4f}")
         else:
             val_metrics = None
 
@@ -827,9 +836,11 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
             if bad_state:
                 print(f"[checkpoint] skipped latest save because model has non-finite tensors: {bad_state}")
             else:
-                save_checkpoint(Path(save_dir) / "latest.pt", model, optimizer, scheduler, epoch, metrics, cfg)
+                _try_save_checkpoint(Path(save_dir) / "latest.pt", model, optimizer, scheduler, epoch, metrics, cfg)
             _append_epoch_log(Path(save_dir) / "log.csv", epoch, _current_lr(optimizer), train_metrics, val_metrics)
             _append_epoch_log(log_txt, epoch, _current_lr(optimizer), train_metrics, val_metrics)
+        if distributed:
+            _distributed_barrier(device)
 
     if distributed:
         _distributed_barrier(device)
