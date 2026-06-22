@@ -22,7 +22,7 @@ def threshold_mask(mask: np.ndarray, thres: float = 0.5) -> np.ndarray:
 def build_spatial_replay_augmenter() -> A.ReplayCompose:
     """Transforms that change the image/mask coordinate system."""
     return A.ReplayCompose([
-        A.RandomScale(scale_limit=(-0.8, 0.0), p=0.75),
+        A.RandomScale(scale_limit=(-0.2, 0.1), p=0.75),
         A.Rotate(limit=45, p=0.2),
         A.HorizontalFlip(p=0.2),
         A.VerticalFlip(p=0.2),

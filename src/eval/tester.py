@@ -159,6 +159,7 @@ def run_test(cfg: dict[str, Any], checkpoint: str, ablation: dict[str, Any] | No
     for sample_path in cfg.get("test_samples", []):
         run_cfg = dict(cfg)
         run_cfg["test_samples"] = [sample_path]
+        run_cfg["type"] = "test"
         loader = make_loader(run_cfg, "test", distributed=False)
         name = _dataset_name(sample_path)
         metrics = evaluate_loader(model, loader, criterion, aux_criterion, sumi_criterion, device, run_cfg, ablation=ablation)

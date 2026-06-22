@@ -33,6 +33,10 @@ DEBUG_METRIC_PREFIXES = (
     "videomt_",
     "sumi_",
     "background_suppression_",
+    "local_",
+    "relay_",
+    "temporal_relay_",
+    "temporal_output_",
 )
 ALWAYS_LOG_METRICS = (
     "adapter_mask32_loss",
@@ -302,6 +306,17 @@ def _is_videomt_model(cfg: dict[str, Any]) -> bool:
     return str((cfg.get("model", {}) or {}).get("name", "")) == "B23VideoMTWindowModel"
 
 
+def _is_temporal_relay_model(cfg: dict[str, Any]) -> bool:
+    return str((cfg.get("model", {}) or {}).get("name", "")) == "B23TemporalRelayLiteModel"
+
+
+def _use_original_resolution_eval(cfg: dict[str, Any]) -> bool:
+    validation_cfg = cfg.get("validation", {}) or {}
+    if cfg.get("type") == "test":
+        return _is_temporal_relay_model(cfg) and bool(((cfg.get("inference", {}) or {}).get("original_resolution", False)))
+    return _is_temporal_relay_model(cfg) and bool(validation_cfg.get("original_resolution", False))
+
+
 def _videomt_stateful_enabled(cfg: dict[str, Any], mode: str) -> bool:
     if not _is_videomt_model(cfg):
         return False
@@ -401,6 +416,16 @@ def _distributed_barrier(device: torch.device) -> None:
         dist.barrier()
 
 
+def _distributed_average_metrics(metrics: dict[str, float], device: torch.device) -> dict[str, float]:
+    if not (dist.is_available() and dist.is_initialized()):
+        return metrics
+    keys = sorted(metrics)
+    values = torch.tensor([float(metrics[key]) for key in keys], device=device, dtype=torch.float64)
+    dist.all_reduce(values, op=dist.ReduceOp.SUM)
+    values = values / dist.get_world_size()
+    return {key: float(value.detach().cpu()) for key, value in zip(keys, values)}
+
+
 def _grad_norm_and_finite(params: list[torch.nn.Parameter], max_norm: float) -> tuple[torch.Tensor, bool]:
     if max_norm > 0:
         norm = torch.nn.utils.clip_grad_norm_(params, max_norm=max_norm, error_if_nonfinite=False)
@@ -461,10 +486,25 @@ def evaluate(
     epoch: int = 10**9,
     include_aux_losses: bool = True,
 ):
+    if _use_original_resolution_eval(cfg):
+        from src.eval.original_resolution import evaluate_original_resolution
+
+        return evaluate_original_resolution(
+            model,
+            criterion,
+            aux_criterion,
+            sumi_criterion,
+            device,
+            cfg,
+            ablation=ablation,
+            epoch=epoch,
+            include_aux_losses=include_aux_losses,
+        )
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     model.eval()
     meters = {key: AverageMeter() for key in ["loss", "iou", "f1", "precision", "recall", "accuracy"]}
+    max_batches = int(((cfg.get("validation", {}) or {}).get("max_batches", 0)) or 0)
     supports_fgm_bank = _supports_fgm_bank(model)
     use_stateful_bank = supports_fgm_bank and _stateful_bank_enabled(cfg, "eval")
     use_videomt_stateful = _videomt_stateful_enabled(cfg, "eval")
@@ -472,7 +512,9 @@ def evaluate(
     fgm_bank = None
     videomt_state = None
     current_video_id = None
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader):
+        if max_batches > 0 and batch_idx >= max_batches:
+            break
         images, masks, _name = unpack_batch(batch)
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
@@ -569,6 +611,7 @@ def _print_param_report(model) -> None:
     print(f"Task adapter trainable params: {count_trainable_by_keyword(model, ('task_adapter.',))}")
     print(f"TCU unravel trainable params: {count_trainable_by_keyword(model, ('tcu.',))}")
     print(f"TTF temporal encoder trainable params: {count_trainable_by_keyword(model, ('temporal_fusion.', 'ttf'))}")
+    print(f"Temporal relay trainable params: {count_trainable_by_keyword(model, ('temporal_relay.',))}")
     print(
         "VidEoMT query trainable params: "
         f"{count_trainable_by_keyword(model, ('query_fusion.', 'query_controller.', 'query_mask_head.', 'feature_proj.'))}"
@@ -585,14 +628,22 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
     if is_main_process():
         dump_json(Path(save_dir) / "config.resolved.json", cfg)
 
+    validation_cfg = cfg.get("validation", {}) or {}
+    val_loader_cfg = dict(cfg)
+    if validation_cfg.get("full_video") is not None:
+        val_loader_cfg["val_full_video"] = bool(validation_cfg.get("full_video"))
+    if validation_cfg.get("test_max_clips") is not None:
+        val_loader_cfg["val_test_max_clips"] = int(validation_cfg.get("test_max_clips"))
     train_loader = make_loader(cfg, "train", distributed=distributed, rank=rank, world_size=world_size)
-    val_loader = make_loader(cfg, "val", distributed=distributed, rank=rank, world_size=world_size)
+    val_loader = make_loader(val_loader_cfg, "val", distributed=distributed, rank=rank, world_size=world_size)
     main_val_loader = None
-    if distributed and is_main_process():
+    if distributed and is_main_process() and bool(validation_cfg.get("rank0_only", False)):
         # Full-video/stateful validation has uneven video-window counts per rank.
         # Rank 0 runs complete validation on the unwrapped model while others wait.
-        main_val_loader = make_loader(cfg, "val", distributed=False)
+        main_val_loader = make_loader(val_loader_cfg, "val", distributed=False)
     model = build_model(cfg).to(device)
+    if distributed:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     if is_main_process():
         _print_param_report(model)
         _init_log_txt(log_txt, cfg, model)
@@ -612,8 +663,11 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
     scaler = torch.cuda.amp.GradScaler(enabled=bool(cfg.get("amp", True)) and torch.cuda.is_available())
     start_epoch = 0
     best_iou = -1.0
-    if cfg.get("checkpoint"):
-        ckpt = load_checkpoint(cfg["checkpoint"], model, optimizer=optimizer, scheduler=scheduler, strict=False)
+    resume_path = cfg.get("resume") or cfg.get("resume_from")
+    if isinstance(cfg.get("checkpoint"), (str, Path)):
+        resume_path = cfg.get("checkpoint")
+    if resume_path:
+        ckpt = load_checkpoint(resume_path, model, optimizer=optimizer, scheduler=scheduler, strict=False)
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         ckpt_metrics = ckpt.get("metrics", {}) or {}
         best_iou = float(ckpt_metrics.get("iou", ckpt_metrics.get("val_iou", best_iou)))
@@ -806,14 +860,19 @@ def run_train(cfg: dict[str, Any], distributed: bool = False, rank: int = 0, loc
             )
         if (epoch + 1) % val_interval == 0 or epoch == n_epochs - 1:
             if distributed:
-                if is_main_process():
-                    val_metrics = evaluate(_inner_model(model), main_val_loader, criterion, aux_criterion, sumi_criterion, device, cfg, epoch=epoch)
-                    metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
+                if main_val_loader is not None:
+                    if is_main_process():
+                        val_metrics = evaluate(_inner_model(model), main_val_loader, criterion, aux_criterion, sumi_criterion, device, val_loader_cfg, epoch=epoch)
+                        metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
+                    else:
+                        val_metrics = None
+                    _distributed_barrier(device)
                 else:
-                    val_metrics = None
-                _distributed_barrier(device)
+                    val_metrics = evaluate(_inner_model(model), val_loader, criterion, aux_criterion, sumi_criterion, device, val_loader_cfg, epoch=epoch)
+                    val_metrics = _distributed_average_metrics(val_metrics, device)
+                    metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
             else:
-                val_metrics = evaluate(model, val_loader, criterion, aux_criterion, sumi_criterion, device, cfg, epoch=epoch)
+                val_metrics = evaluate(model, val_loader, criterion, aux_criterion, sumi_criterion, device, val_loader_cfg, epoch=epoch)
                 metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
             if is_main_process() and val_metrics is not None:
                 print(

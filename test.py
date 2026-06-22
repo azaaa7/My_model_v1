@@ -15,6 +15,9 @@ def parse_args():
     parser.add_argument("--disable-fgm", action="store_true")
     parser.add_argument("--shuffle-bank", action="store_true")
     parser.add_argument("--zero-bank", action="store_true")
+    parser.add_argument("--disable-temporal-relay", action="store_true")
+    parser.add_argument("--disable-local-neighborhood", action="store_true")
+    parser.add_argument("--disable-global-relay", action="store_true")
     return parser.parse_args()
 
 
@@ -28,6 +31,9 @@ def main():
         "disable_fgm": args.disable_fgm,
         "shuffle_bank": args.shuffle_bank,
         "zero_bank": args.zero_bank,
+        "disable_temporal_relay": args.disable_temporal_relay,
+        "disable_local_neighborhood": args.disable_local_neighborhood,
+        "disable_global_relay": args.disable_global_relay,
     }
     ablation.update(cfg.get("test_ablation", {}) or {})
     run_test(cfg, checkpoint=args.checkpoint, ablation=ablation)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import os
+import signal
 import subprocess
 import sys
 from datetime import timedelta
@@ -10,6 +11,9 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+
+
+_SIGNAL_HANDLER_INSTALLED = False
 
 
 def is_dist_avail_and_initialized() -> bool:
@@ -74,6 +78,23 @@ def cleanup_distributed() -> None:
         dist.destroy_process_group()
 
 
+def install_distributed_signal_handlers() -> None:
+    """Exit DDP ranks promptly on Ctrl+C/TERM instead of lingering in NCCL."""
+    global _SIGNAL_HANDLER_INSTALLED
+    if _SIGNAL_HANDLER_INSTALLED:
+        return
+    _SIGNAL_HANDLER_INSTALLED = True
+
+    def _handler(signum, _frame):
+        try:
+            cleanup_distributed()
+        finally:
+            os._exit(128 + int(signum))
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+
+
 def _split_devices(value: Any) -> list[str]:
     if value is None:
         return []
@@ -126,4 +147,15 @@ def maybe_relaunch_with_torchrun(cfg: dict[str, Any], config_path: Path) -> None
     else:
         cmd.extend(["--config", str(config_path)])
     print(f"[torchrun] relaunch nproc_per_node={nproc} CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', '<inherit>')}")
-    raise SystemExit(subprocess.call(cmd, env=env))
+    proc = subprocess.Popen(cmd, env=env, start_new_session=True)
+    try:
+        raise SystemExit(proc.wait())
+    except KeyboardInterrupt:
+        print("[torchrun] Ctrl+C received; terminating child ranks...", flush=True)
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        raise SystemExit(130)

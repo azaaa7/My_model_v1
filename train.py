@@ -4,7 +4,12 @@ import argparse
 
 from src.train import run_train
 from src.utils.config import load_config, resolve_config_path
-from src.utils.distributed import cleanup_distributed, init_distributed_mode, maybe_relaunch_with_torchrun
+from src.utils.distributed import (
+    cleanup_distributed,
+    init_distributed_mode,
+    install_distributed_signal_handlers,
+    maybe_relaunch_with_torchrun,
+)
 from src.utils.seed import set_seed
 
 
@@ -24,12 +29,14 @@ def main():
     maybe_relaunch_with_torchrun(cfg, cfg_path)
     set_seed(int(cfg.get("seed", 666666)))
     distributed, rank, local_rank, world_size = init_distributed_mode(cfg)
+    install_distributed_signal_handlers()
     try:
         run_train(cfg, distributed=distributed, rank=rank, local_rank=local_rank, world_size=world_size)
+    except KeyboardInterrupt:
+        raise SystemExit(130)
     finally:
         cleanup_distributed()
 
 
 if __name__ == "__main__":
     main()
-
