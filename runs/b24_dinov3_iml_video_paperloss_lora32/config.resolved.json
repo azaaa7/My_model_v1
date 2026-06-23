@@ -1,0 +1,123 @@
+{
+  "type": "train",
+  "seed": 666666,
+  "input_size": 512,
+  "batch_size": 1,
+  "num_clips": 4,
+  "num_frames": 4,
+  "clip_stride": 1,
+  "encoder_chunk": 2,
+  "gt_ratio": 1,
+  "train_samples": [
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_tra_DVI_30.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_tra_CPNET_30.npy"
+  ],
+  "val_samples": [
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_DVI_20.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_CPNET_20.npy"
+  ],
+  "test_samples": [
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_DVI_20.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_CPNET_20.npy",
+    "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/flist/DAVIS-VI_val_OPN_20.npy"
+  ],
+  "augment_prob": 0.75,
+  "spatial_augment_prob": 0.75,
+  "appearance_augment_prob": 0.5,
+  "amp": true,
+  "use_activation_checkpoint": true,
+  "grad_accum_steps": 8,
+  "num_workers": 4,
+  "log_interval": 20,
+  "model": {
+    "name": "B24DINOv3IMLCCMVideoModel"
+  },
+  "dinov3": {
+    "repo": "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/dinov3",
+    "weights": "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/dinov3/dinov3_weight/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
+    "model_name": "dinov3_vitl16",
+    "input_size": 512,
+    "patch_size": 16,
+    "output_block": 23,
+    "output_resolution": 32,
+    "feature_dim": 1024,
+    "freeze_backbone": true,
+    "allow_hub_download": false
+  },
+  "lora": {
+    "enabled": true,
+    "rank": 32,
+    "alpha": 64,
+    "dropout": 0.0,
+    "layers": "all",
+    "targets": "attn.qkv"
+  },
+  "tfcu": {
+    "version": "ccm_predecoder",
+    "ccm": {
+      "enabled": false,
+      "dim": 128,
+      "heads": 4,
+      "q_resolution": 32,
+      "kv_resolution": 16,
+      "frame_mask": "lower_triangular",
+      "random_mask": {
+        "enabled": true,
+        "keep_prob": 0.7
+      },
+      "fusion": "residual_concat",
+      "alpha_init": 0.002,
+      "alpha_max": 0.05,
+      "aux_head": false
+    }
+  },
+  "decoder": {
+    "type": "dinov3_iml_head",
+    "in_channels": 1024,
+    "hidden1": 512,
+    "hidden2": 256,
+    "norm": "bn",
+    "image_size": 512
+  },
+  "loss": {
+    "name": "dinov3_iml_original",
+    "edge_lambda": 20.0,
+    "edge_mask_width": 7
+  },
+  "optimizer": {
+    "learning_rate": 0.0003,
+    "lr_lora": 0.0003,
+    "lr_ccm": 0.0001,
+    "lr_decoder": 0.0003,
+    "weight_decay": 0.05
+  },
+  "scheduler": {
+    "type": "cosine",
+    "warmup_epochs": 5,
+    "min_lr": 1e-06
+  },
+  "val_full_video": true,
+  "test_full_video": true,
+  "test_max_clips": 4,
+  "train": {
+    "n_epochs": 500,
+    "save_dir": "/home/wzk/Exp/dinov3_b23_tfcu_ccm_fgm_lite/runs/b24_dinov3_iml_video_paperloss_lora32",
+    "val_interval": 10
+  },
+  "validation": {
+    "full_video": true
+  },
+  "ddp": {
+    "auto_torchrun": true,
+    "cuda_visible_devices": "0,1",
+    "nproc_per_node": 2,
+    "dist_backend": "nccl",
+    "find_unused_parameters": false,
+    "pytorch_cuda_alloc_conf": "expandable_segments:True",
+    "torchrun_log_dir": "runs/b24_dinov3_iml_video_paperloss_lora32/torchrun_logs",
+    "torchrun_tee": ""
+  },
+  "debug": {
+    "log_shapes": true
+  }
+}

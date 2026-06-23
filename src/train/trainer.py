@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from src.data import build_dataloader
 from src.eval.metrics import AverageMeter, binary_metrics_from_logits
-from src.losses import AuxiliaryLoss, CompositeForensicLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss, VideoMTLoss, VideoMTQueryMaskLoss
+from src.losses import AuxiliaryLoss, CompositeForensicLoss, DINOv3IMLOriginalLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss, VideoMTLoss, VideoMTQueryMaskLoss
 from src.models.builder import build_model
 from src.models.b23_tfcu_ccm_fgm_model import count_parameters, count_trainable_by_keyword
 from src.train.checkpoint import load_checkpoint, save_checkpoint
@@ -91,6 +91,8 @@ def build_loss(cfg: dict[str, Any]):
     loss_cfg = cfg.get("loss", {}) or {}
     loss_type = str(loss_cfg.get("type", "")).lower()
     loss_name = str(loss_cfg.get("name", "")).lower()
+    if loss_name in {"dinov3_iml_original", "dinov3imloriginalloss"}:
+        return DINOv3IMLOriginalLoss(loss_cfg), None
     if loss_type == "composite_forensic":
         return CompositeForensicLoss(loss_cfg), None
     if loss_type == "ttf_minimal":
