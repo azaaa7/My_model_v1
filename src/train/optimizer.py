@@ -12,6 +12,8 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
     weight_decay = float(opt_cfg.get("weight_decay", 1e-4))
     groups = {
         "lora": {"params": [], "lr": float(opt_cfg.get("lr_lora", 1e-5))},
+        "adapter": {"params": [], "lr": float(opt_cfg.get("lr_adapter", base_lr))},
+        "micro_refine": {"params": [], "lr": float(opt_cfg.get("lr_micro_refine", opt_cfg.get("lr_decoder", base_lr)))},
         "temporal_relay": {"params": [], "lr": float(opt_cfg.get("lr_temporal", base_lr))},
         "temporal_encoder": {"params": [], "lr": float(opt_cfg.get("lr_temporal_encoder", base_lr))},
         "ccm": {"params": [], "lr": float(opt_cfg.get("lr_ccm", base_lr))},
@@ -35,6 +37,10 @@ def build_optimizer(model: nn.Module, cfg: dict[str, Any]):
         clean = name[len("module."):] if name.startswith("module.") else name
         if "lora_" in clean:
             groups["lora"]["params"].append(param)
+        elif "micro_refine" in clean or "low3d" in clean or "high2d" in clean:
+            groups["micro_refine"]["params"].append(param)
+        elif clean.startswith("nogate_sta.") or ".nogate_sta." in clean:
+            groups["adapter"]["params"].append(param)
         elif "temporal_relay." in clean:
             groups["temporal_relay"]["params"].append(param)
         elif "query_controller." in clean:

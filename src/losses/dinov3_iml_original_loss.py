@@ -49,6 +49,10 @@ class DINOv3IMLOriginalLoss(nn.Module):
         cfg = cfg or {}
         self.edge_lambda = float(cfg.get("edge_lambda", 20.0))
         self.edge_mask_width = int(cfg.get("edge_mask_width", 7))
+        reg_cfg = cfg.get("residual_regularization", {}) or {}
+        self.residual_regularization_enabled = bool(reg_cfg.get("enabled", False))
+        self.delta32_l1_weight = float(reg_cfg.get("delta32_l1_weight", 0.003))
+        self.delta128_l1_weight = float(reg_cfg.get("delta128_l1_weight", 0.001))
         self.bce = nn.BCEWithLogitsLoss()
 
     def forward(
@@ -59,7 +63,7 @@ class DINOv3IMLOriginalLoss(nn.Module):
         epoch: int | None = None,
         include_aux: bool = True,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del aux, epoch, include_aux
+        del epoch, include_aux
         logits = _flatten_to_nchw(logits)
         target = _flatten_to_nchw(target).float()
         if target.shape[-2:] != logits.shape[-2:]:
@@ -72,6 +76,14 @@ class DINOv3IMLOriginalLoss(nn.Module):
         items = {
             "predict_loss": float(predict_loss.detach().cpu()),
             "edge_loss": float(edge_loss.detach().cpu()),
-            "main_loss": float(total.detach().cpu()),
         }
+        if self.residual_regularization_enabled and aux:
+            res_loss = logits.sum() * 0.0
+            if aux.get("delta32") is not None:
+                res_loss = res_loss + aux["delta32"].abs().mean() * self.delta32_l1_weight
+            if aux.get("delta128") is not None:
+                res_loss = res_loss + aux["delta128"].abs().mean() * self.delta128_l1_weight
+            total = total + res_loss
+            items["residual_regularization_loss"] = float(res_loss.detach().cpu())
+        items["main_loss"] = float(total.detach().cpu())
         return total, items

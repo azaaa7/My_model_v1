@@ -35,7 +35,7 @@ num_workers: 4
 log_interval: 20
 
 model:
-  name: "B24DINOv3IMLCCMVideoModel"
+  name: "B31DINOv3IMLNoGateStABRMRVideoModel"
 
 dinov3:
   repo: "./dinov3"
@@ -57,40 +57,50 @@ lora:
   layers: "all"
   targets: "attn.qkv"
 
-tfcu:
-  version: "ccm_predecoder"
-  ccm:
-    enabled: true
-    dim: 128
-    heads: 4
-    q_resolution: 32
-    kv_resolution: 16
-    frame_mask: "lower_triangular"
-    random_mask: {enabled: true, keep_prob: 0.70}
-    fusion: "residual_concat"
-    alpha_init: 0.002
-    alpha_max: 0.05
-    aux_head: false
-    fuse_zero_init: true
+nogate_sta:
+  enabled: true
+  bottleneck: 128
+  multiscale: false
+  spatial_kernel: 3
+  temporal_kernel: 3
+  norm: "gn"
+  act: "gelu"
+  zero_init_up: true
+  drop_path_prob: 0.05
 
 decoder:
-  type: "dinov3_iml_head"
+  type: "bounded_residual_micro_refine"
   in_channels: 1024
   hidden1: 512
   hidden2: 256
-  norm: "bn"
+  norm: "gn"
   image_size: 512
+  micro_refine:
+    enabled: true
+    channels: 64
+    high_res: 128
+    use_high128: true
+    delta32_clip: 1.0
+    delta128_clip: 0.75
+    use_prob: true
+    use_uncertainty: true
+    detach_coarse_for_refine: false
 
 loss:
   name: "dinov3_iml_original"
   edge_lambda: 20.0
   edge_mask_width: 7
+  residual_regularization:
+    enabled: false
+    delta32_l1_weight: 0.003
+    delta128_l1_weight: 0.001
 
 optimizer:
   learning_rate: 3.0e-4
-  lr_lora: 3.0e-4
-  lr_ccm: 1.0e-4
+  lr_lora: 1.0e-4
+  lr_adapter: 1.0e-4
   lr_decoder: 3.0e-4
+  lr_micro_refine: 3.0e-4
   weight_decay: 5.0e-2
 
 scheduler:
@@ -104,20 +114,21 @@ test_max_clips: 4
 
 train:
   n_epochs: 500
-  save_dir: "runs/b24_dinov3_iml_ccm_video_paperloss_lora32"
+  save_dir: "runs/b31_dinov3_iml_nogate_sta_brmr_lora32"
   val_interval: 10
 
 validation:
   full_video: true
+  max_batches: null
 
 ddp:
   auto_torchrun: true
-  cuda_visible_devices: "2,3"
+  cuda_visible_devices: "6,7"
   nproc_per_node: 2
   dist_backend: "nccl"
   find_unused_parameters: false
   pytorch_cuda_alloc_conf: "expandable_segments:True"
-  torchrun_log_dir: "runs/b24_dinov3_iml_ccm_video_paperloss_lora32/torchrun_logs"
+  torchrun_log_dir: "runs/b31_dinov3_iml_nogate_sta_brmr_lora32/torchrun_logs"
   torchrun_tee: ""
 
 debug:
