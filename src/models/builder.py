@@ -7,6 +7,7 @@ from . import (
     B23TemporalRelayLiteModel,
     B23VideoMTWindowModel,
     B24DINOv3IMLCCMVideoModel,
+    B24DINOv3IMLTDGXTOAttnQVolVideoModel,
     B25DINOv3IMLNoGateStAVideoModel,
     B31DINOv3IMLNoGateStABRMRVideoModel,
 )
@@ -17,6 +18,8 @@ def build_model(cfg: dict[str, Any]):
     name = str(model_cfg.get("name", "B23TFCUCCMFGMLiteModel"))
     if name == "B24DINOv3IMLCCMVideoModel":
         return B24DINOv3IMLCCMVideoModel(cfg)
+    if name == "B24DINOv3IMLTDGXTOAttnQVolVideoModel":
+        return B24DINOv3IMLTDGXTOAttnQVolVideoModel(cfg)
     if name == "B25DINOv3IMLNoGateStAVideoModel":
         return B25DINOv3IMLNoGateStAVideoModel(cfg)
     if name == "B31DINOv3IMLNoGateStABRMRVideoModel":

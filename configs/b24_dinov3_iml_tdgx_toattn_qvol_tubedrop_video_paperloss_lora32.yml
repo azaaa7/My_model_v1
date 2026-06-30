@@ -1,0 +1,157 @@
+type: train
+seed: 666666
+
+input_size: 512
+batch_size: 1
+num_clips: 4
+num_frames: 4
+clip_stride: 1
+encoder_chunk: 2
+gt_ratio: 1
+
+train_samples:
+  - "./flist/DAVIS-VI_tra_DVI_30.npy"
+  - "./flist/DAVIS-VI_tra_CPNET_30.npy"
+
+val_samples:
+  - "./flist/DAVIS-VI_val_DVI_20.npy"
+  - "./flist/DAVIS-VI_val_CPNET_20.npy"
+
+test_samples:
+  - "./flist/DAVIS-VI_val_DVI_20.npy"
+  - "./flist/DAVIS-VI_val_CPNET_20.npy"
+  - "./flist/DAVIS-VI_val_OPN_20.npy"
+
+augment_prob: 0.75
+spatial_augment_prob: 0.75
+appearance_augment_prob: 0.50
+
+amp: true
+use_activation_checkpoint: true
+grad_accum_steps: 8
+num_workers: 4
+log_interval: 20
+
+model:
+  name: "B24DINOv3IMLTDGXTOAttnQVolVideoModel"
+
+dinov3:
+  repo: "./dinov3"
+  weights: "./dinov3/dinov3_weight/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+  model_name: "dinov3_vitl16"
+  input_size: 512
+  patch_size: 16
+  output_block: 23
+  output_resolution: 32
+  feature_dim: 1024
+  freeze_backbone: true
+  allow_hub_download: false
+
+lora:
+  enabled: true
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  layers: "all"
+  targets: "attn.qkv"
+
+temporal_tube_dropout:
+  enabled: true
+  drop_prob: 0.10
+
+tdgx:
+  enabled: true
+  hidden_dim: 64
+  use_adjacent_diff: true
+  use_stride2_diff: true
+  gate: true
+  gate_type: "channel_spatial"
+  gate_bias_init: -2.0
+  zero_init_value: true
+  beta_init: 0.0
+  beta_max: 0.03
+  drop_path_prob: 0.05
+
+temporal_only_attn:
+  enabled: true
+  dim: 64
+  heads: 4
+  dropout: 0.0
+  use_temporal_pos: true
+  zero_init_out: true
+  alpha_init: 0.0
+  alpha_max: 0.03
+  drop_path_prob: 0.10
+
+query_volume_decoder:
+  enabled: true
+  in_channels: 1024
+  query_dim: 256
+  num_queries: 8
+  num_layers: 3
+  num_heads: 8
+  ffn_dim: 1024
+  dropout: 0.0
+  image_size: 512
+  output_resolution: 32
+  use_aux_outputs: true
+  combine_method: "soft_or"
+
+loss:
+  name: "aggressive_video_mask_loss"
+  final_mask:
+    enabled: true
+    bce_weight: 1.0
+    dice_weight: 1.0
+  aux_mask:
+    enabled: true
+    weight: 0.40
+    bce_weight: 1.0
+    dice_weight: 1.0
+  edge:
+    enabled: true
+    weight: 5.0
+    width: 7
+  temporal_consistency:
+    enabled: false
+    weight: 0.01
+    gamma: 5.0
+    warmup_epochs: 30
+
+optimizer:
+  learning_rate: 3.0e-4
+  lr_lora: 3.0e-4
+  lr_tdgx: 1.0e-4
+  lr_temporal_attn: 1.0e-4
+  lr_decoder: 3.0e-4
+  weight_decay: 5.0e-2
+
+scheduler:
+  type: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+
+val_full_video: true
+test_full_video: true
+test_max_clips: 4
+
+train:
+  n_epochs: 500
+  save_dir: "runs/b24_dinov3_iml_tdgx_toattn_qvol_tubedrop_video_paperloss_lora32"
+  val_interval: 10
+
+validation:
+  full_video: true
+
+ddp:
+  auto_torchrun: true
+  cuda_visible_devices: "0,1"
+  nproc_per_node: 2
+  dist_backend: "nccl"
+  find_unused_parameters: false
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
+  torchrun_log_dir: "runs/b24_dinov3_iml_tdgx_toattn_qvol_tubedrop_video_paperloss_lora32/torchrun_logs"
+  torchrun_tee: ""
+
+debug:
+  log_shapes: true

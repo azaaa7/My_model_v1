@@ -78,6 +78,28 @@ def cleanup_distributed() -> None:
         dist.destroy_process_group()
 
 
+def _terminate_torchrun_process_group(
+    proc: subprocess.Popen[Any],
+    *,
+    reason: str,
+    sigterm_timeout: float = 10.0,
+) -> None:
+    if proc.poll() is not None:
+        return
+    print(f"[torchrun] {reason}; terminating child ranks...", flush=True)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=sigterm_timeout)
+    except ProcessLookupError:
+        return
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        proc.wait()
+
+
 def install_distributed_signal_handlers() -> None:
     """Exit DDP ranks promptly on Ctrl+C/TERM instead of lingering in NCCL."""
     global _SIGNAL_HANDLER_INSTALLED
@@ -93,6 +115,8 @@ def install_distributed_signal_handlers() -> None:
 
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _handler)
 
 
 def _split_devices(value: Any) -> list[str]:
@@ -148,14 +172,21 @@ def maybe_relaunch_with_torchrun(cfg: dict[str, Any], config_path: Path) -> None
         cmd.extend(["--config", str(config_path)])
     print(f"[torchrun] relaunch nproc_per_node={nproc} CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', '<inherit>')}")
     proc = subprocess.Popen(cmd, env=env, start_new_session=True)
+    forwarded_signals: list[int] = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        forwarded_signals.append(signal.SIGHUP)
+    previous_handlers: dict[int, Any] = {}
+
+    def _forward_signal(signum, _frame):
+        _terminate_torchrun_process_group(proc, reason=f"signal {signum} received by launcher")
+        raise SystemExit(128 + int(signum))
+
+    for signum in forwarded_signals:
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, _forward_signal)
     try:
         raise SystemExit(proc.wait())
-    except KeyboardInterrupt:
-        print("[torchrun] Ctrl+C received; terminating child ranks...", flush=True)
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-        raise SystemExit(130)
+    finally:
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
+        _terminate_torchrun_process_group(proc, reason="launcher exiting")

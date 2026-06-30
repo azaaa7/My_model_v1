@@ -40,6 +40,36 @@ def _checkpoint_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _uses_frozen_dinov3_backbone(cfg: dict[str, Any]) -> bool:
+    dinov3_cfg = cfg.get("dinov3", {}) or {}
+    return bool(dinov3_cfg.get("freeze_backbone", False))
+
+
+def _should_save_compact(cfg: dict[str, Any], ckpt_cfg: dict[str, Any]) -> bool:
+    explicit = ckpt_cfg.get("save_trainable_only", ckpt_cfg.get("compact"))
+    if explicit is not None:
+        return bool(explicit)
+    # Default to compact checkpoints when the pretrained DINOv3 backbone is frozen.
+    # The backbone will be reconstructed from the config's local pretrained weights
+    # before loading the trainable deltas from the checkpoint.
+    return _uses_frozen_dinov3_backbone(cfg)
+
+
+def _materialize_state_dict_for_load(target: nn.Module, state: dict[str, Any], ckpt: dict[str, Any]) -> dict[str, Any]:
+    fmt = str(ckpt.get("checkpoint_format", ""))
+    is_compact = fmt == "compact_trainable"
+    if not is_compact:
+        target_keys = set(target.state_dict().keys())
+        state_keys = set(state.keys())
+        is_compact = bool(target_keys - state_keys)
+    if not is_compact:
+        return state
+
+    merged = target.state_dict()
+    merged.update(state)
+    return merged
+
+
 def save_checkpoint(
     path: str | Path,
     model: nn.Module,
@@ -52,7 +82,7 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     ckpt_cfg = _checkpoint_cfg(cfg)
-    compact = bool(ckpt_cfg.get("save_trainable_only", ckpt_cfg.get("compact", False)))
+    compact = _should_save_compact(cfg, ckpt_cfg)
     save_optimizer = bool(ckpt_cfg.get("save_optimizer", True))
     save_scheduler = bool(ckpt_cfg.get("save_scheduler", True))
     payload = {
@@ -80,6 +110,8 @@ def load_checkpoint(path: str | Path, model: nn.Module, optimizer=None, schedule
     ckpt = torch.load(path, map_location="cpu")
     state = ckpt.get("model", ckpt)
     target = model.module if hasattr(model, "module") else model
+    if isinstance(state, dict):
+        state = _materialize_state_dict_for_load(target, state, ckpt if isinstance(ckpt, dict) else {})
     missing, unexpected = target.load_state_dict(state, strict=strict)
     print(f"[checkpoint] loaded {path} missing={len(missing)} unexpected={len(unexpected)}")
     if optimizer is not None and ckpt.get("optimizer") is not None:

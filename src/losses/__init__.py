@@ -6,8 +6,10 @@ from .ttf_minimal_loss import TTFMinimalLoss
 from .videomt_loss import VideoMTLoss
 from .videomt_query_mask_loss import VideoMTQueryMaskLoss
 from .sumi_localization_losses import SUMILocalizationLoss, SUMIMinimalityHeads
+from .aggressive_video_mask_loss import AggressiveVideoMaskLoss
 
 __all__ = [
+    "AggressiveVideoMaskLoss",
     "AuxiliaryLoss",
     "CompositeForensicLoss",
     "DINOv3IMLOriginalLoss",

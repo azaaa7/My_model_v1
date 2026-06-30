@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from src.data import build_dataloader
 from src.eval.metrics import AverageMeter, binary_metrics_from_logits
-from src.losses import AuxiliaryLoss, CompositeForensicLoss, DINOv3IMLOriginalLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss, VideoMTLoss, VideoMTQueryMaskLoss
+from src.losses import AggressiveVideoMaskLoss, AuxiliaryLoss, CompositeForensicLoss, DINOv3IMLOriginalLoss, SegmentationLoss, SUMILocalizationLoss, TTFMinimalLoss, VideoMTLoss, VideoMTQueryMaskLoss
 from src.models.builder import build_model
 from src.models.b23_tfcu_ccm_fgm_model import count_parameters, count_trainable_by_keyword
 from src.train.checkpoint import load_checkpoint, save_checkpoint
@@ -93,6 +93,8 @@ def build_loss(cfg: dict[str, Any]):
     loss_name = str(loss_cfg.get("name", "")).lower()
     if loss_name in {"dinov3_iml_original", "dinov3imloriginalloss"}:
         return DINOv3IMLOriginalLoss(loss_cfg), None
+    if loss_name in {"aggressive_video_mask_loss", "aggressivevideomaskloss"}:
+        return AggressiveVideoMaskLoss(loss_cfg), None
     if loss_type == "composite_forensic":
         return CompositeForensicLoss(loss_cfg), None
     if loss_type == "ttf_minimal":
@@ -376,8 +378,14 @@ def _filter_by_valid_mask(logits: torch.Tensor, target: torch.Tensor, aux: dict[
         return logits, target, aux
     valid = valid_mask.reshape(-1)
 
-    def filter_tensor(x: torch.Tensor | None):
+    def filter_value(x):
         if x is None or not torch.is_tensor(x):
+            if isinstance(x, list):
+                return [filter_value(item) for item in x]
+            if isinstance(x, tuple):
+                return tuple(filter_value(item) for item in x)
+            if isinstance(x, dict):
+                return {key: filter_value(value) for key, value in x.items()}
             return x
         if x.ndim >= valid_mask.ndim + 1 and tuple(x.shape[:valid_mask.ndim]) == tuple(valid_mask.shape):
             return x.reshape(-1, *x.shape[valid_mask.ndim:])[valid]
@@ -390,8 +398,8 @@ def _filter_by_valid_mask(logits: torch.Tensor, target: torch.Tensor, aux: dict[
         if key == "debug":
             filtered_aux[key] = value
         else:
-            filtered_aux[key] = filter_tensor(value)
-    return filter_tensor(logits), filter_tensor(target), filtered_aux
+            filtered_aux[key] = filter_value(value)
+    return filter_value(logits), filter_value(target), filtered_aux
 
 
 def _num_target_frames(target: torch.Tensor) -> int:
